@@ -231,21 +231,24 @@ jobs:
 
       - name: Download Ruffle self-hosted
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          
           set -euo pipefail
-          
+
           rm -rf build/ruffle
           mkdir -p build/ruffle
-          
+
           cd build/ruffle
-          
+
+          echo "Downloading Ruffle v${RUFFLE_VERSION}..."
+
           gh release download \
             "v${RUFFLE_VERSION}" \
             --repo ruffle-rs/ruffle \
             --pattern "*web*selfhosted*.zip" \
             --clobber
-          
+
           ZIP="$(
             find . \
               -maxdepth 1 \
@@ -254,24 +257,36 @@ jobs:
               -print \
               | head -n 1
           )"
-          
+
           if [ -z "$ZIP" ]; then
             echo "ERROR: Ruffle self-hosted asset not found."
+
+            echo
+            echo "Available release assets:"
+
             gh release view \
               "v${RUFFLE_VERSION}" \
               --repo ruffle-rs/ruffle \
               --json assets \
               --jq '.assets[].name'
+
             exit 1
           fi
-          
+
+          echo
+          echo "Ruffle archive:"
+          echo "$ZIP"
+
           mkdir -p extracted
-          
+
           unzip \
             -q \
             -o \
             "$ZIP" \
             -d extracted
+
+          echo
+          echo "Ruffle extracted successfully."
 
       - name: Validate Ruffle
         shell: bash
