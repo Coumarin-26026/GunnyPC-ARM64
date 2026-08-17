@@ -3,328 +3,892 @@ name: Analyze Gunny PC
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   analyze:
+    name: Download and Analyze Gunny PC
     runs-on: macos-14
 
     steps:
 
-      # ==========================================
+      # ============================================================
       # 1. Checkout repository
-      # ==========================================
+      # ============================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      # ==========================================
-      # 2. Cài công cụ
-      # ==========================================
+      # ============================================================
+      # 2. Install tools
+      # ============================================================
 
       - name: Install tools
         run: |
+          set -e
+
+          echo "Installing tools..."
+
           brew install p7zip
 
           npm install -g @electron/asar
 
+          echo
+          echo "===== TOOL VERSIONS ====="
 
-      # ==========================================
-      # 3. Tạo thư mục
-      # ==========================================
+          node --version
+          npm --version
+          asar --version || true
+          7z i | head -20
+
+
+      # ============================================================
+      # 3. Show runner architecture
+      # ============================================================
+
+      - name: Show runner information
+        run: |
+          echo "========================================"
+          echo "RUNNER INFORMATION"
+          echo "========================================"
+
+          echo
+          echo "uname:"
+          uname -a
+
+          echo
+          echo "architecture:"
+          uname -m
+
+          echo
+          echo "CPU:"
+          sysctl -n machdep.cpu.brand_string || true
+
+          echo
+          echo "Node architecture:"
+          node -p "process.arch"
+
+
+      # ============================================================
+      # 4. Create directories
+      # ============================================================
 
       - name: Create directories
         run: |
+          set -e
+
+          rm -rf download
+          rm -rf extracted
+          rm -rf analysis
+
           mkdir -p download
           mkdir -p extracted
           mkdir -p analysis
 
+          echo "Directories created."
 
-      # ==========================================
-      # 4. Tải Gunny từ Google Drive
-      # ==========================================
 
-      - name: Download Gunny
+      # ============================================================
+      # 5. Download Gunny from Google Drive
+      # ============================================================
+
+      - name: Download Gunny from Google Drive
         run: |
-          curl -L \
-            "https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b" \
-            -o download/gunny.zip
+          set -e
 
+          URL="https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b"
+
+          echo "Downloading Gunny..."
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            "$URL" \
+            --output download/gunny.zip
+
+          echo
           echo "===== DOWNLOADED FILE ====="
 
           ls -lh download/gunny.zip
 
+          echo
+          echo "===== FILE TYPE ====="
+
           file download/gunny.zip
 
+          echo
+          echo "===== ZIP TEST ====="
 
-      # ==========================================
-      # 5. Giải nén ZIP
-      # ==========================================
+          unzip -t download/gunny.zip
+
+
+      # ============================================================
+      # 6. Extract ZIP
+      # ============================================================
 
       - name: Extract Gunny ZIP
         run: |
-          unzip -o \
+          set -e
+
+          echo "Extracting Gunny..."
+
+          unzip \
+            -q \
+            -o \
             download/gunny.zip \
             -d extracted
 
-          echo "===== EXTRACTED ====="
-
-          find extracted -maxdepth 3 -print
-
-
-      # ==========================================
-      # 6. Xóa __MACOSX
-      # ==========================================
-
-      - name: Remove macOS metadata
-        run: |
-          rm -rf extracted/__MACOSX
-
-          echo "===== CLEAN STRUCTURE ====="
-
-          find extracted -maxdepth 4 -print
-
-
-      # ==========================================
-      # 7. Kiểm tra Gunny PC.app
-      # ==========================================
-
-      - name: Locate Gunny application
-        run: |
-          echo "===== APPLICATION ====="
+          echo
+          echo "===== EXTRACTED TOP LEVEL ====="
 
           find extracted \
+            -maxdepth 2 \
+            -print \
+            | sort
+
+
+      # ============================================================
+      # 7. Remove __MACOSX metadata
+      # ============================================================
+
+      - name: Remove macOS ZIP metadata
+        run: |
+          set -e
+
+          rm -rf extracted/__MACOSX
+
+          echo "Removed __MACOSX."
+
+          echo
+          echo "===== CLEAN STRUCTURE ====="
+
+          find extracted \
+            -maxdepth 4 \
+            -print \
+            | sort
+
+
+      # ============================================================
+      # 8. Locate Gunny PC.app
+      # ============================================================
+
+      - name: Locate Gunny PC application
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "GUNNY APPLICATION"
+          echo "========================================"
+
+          APPS=$(find extracted \
             -type d \
             -name "*.app" \
-            -print
+            -print)
 
+          echo "$APPS"
 
-      # ==========================================
-      # 8. Kiểm tra architecture hiện tại
-      # ==========================================
-
-      - name: Analyze Intel architecture
-        run: |
-          echo "===== CURRENT ARCHITECTURE ====="
-
-          find "extracted/Gunny PC.app" \
-            -type f \
-            -perm -111 \
-            -print0 |
-          while IFS= read -r -d '' file; do
+          if [ ! -d "extracted/Gunny PC.app" ]; then
             echo
-            echo "--------------------------------"
-            echo "$file"
-            file "$file"
-          done
+            echo "ERROR: Gunny PC.app was not found."
+            exit 1
+          fi
+
+          echo
+          echo "Gunny PC.app found."
 
 
-      # ==========================================
-      # 9. Kiểm tra app.asar
-      # ==========================================
+      # ============================================================
+      # 9. Display application structure
+      # ============================================================
 
-      - name: Locate app.asar
+      - name: Inspect application structure
         run: |
-          echo "===== APP.ASAR ====="
+          set -e
 
-          find "extracted/Gunny PC.app" \
-            -name "app.asar" \
+          APP="extracted/Gunny PC.app"
+
+          echo "========================================"
+          echo "APPLICATION STRUCTURE"
+          echo "========================================"
+
+          find "$APP/Contents" \
+            -maxdepth 4 \
+            -print \
+            | sort
+
+
+      # ============================================================
+      # 10. Read main Info.plist
+      # ============================================================
+
+      - name: Read application Info.plist
+        run: |
+          set -e
+
+          APP="extracted/Gunny PC.app"
+
+          echo "========================================"
+          echo "APPLICATION INFO.PLIST"
+          echo "========================================"
+
+          if [ -f "$APP/Contents/Info.plist" ]; then
+            plutil \
+              -p \
+              "$APP/Contents/Info.plist"
+          else
+            echo "Info.plist not found."
+          fi
+
+
+      # ============================================================
+      # 11. Locate Electron Framework
+      # ============================================================
+
+      - name: Locate Electron Framework
+        run: |
+          set -e
+
+          APP="extracted/Gunny PC.app"
+
+          echo "========================================"
+          echo "ELECTRON FRAMEWORK"
+          echo "========================================"
+
+          find "$APP/Contents/Frameworks" \
+            -maxdepth 3 \
+            -name "Electron Framework.framework" \
             -print
 
-
-      # ==========================================
-      # 10. Extract app.asar
-      # ==========================================
-
-      - name: Extract app.asar
-        run: |
-
-          mkdir -p analysis/app
-
-          asar extract \
-            "extracted/Gunny PC.app/Contents/Resources/app.asar" \
-            analysis/app
-
-          echo "===== APP.ASAR EXTRACTED ====="
-
-          find analysis/app \
-            -maxdepth 3 \
-            -print | sort
+          if [ ! -d "$APP/Contents/Frameworks/Electron Framework.framework" ]; then
+            echo
+            echo "ERROR: Electron Framework.framework not found."
+            exit 1
+          fi
 
 
-      # ==========================================
-      # 11. Tìm package.json
-      # ==========================================
-
-      - name: Find package.json
-        run: |
-
-          echo "===== PACKAGE.JSON FILES ====="
-
-          find analysis/app \
-            -name "package.json" \
-            -print
-
-
-      # ==========================================
-      # 12. Đọc package.json
-      # ==========================================
-
-      - name: Read package.json
-        run: |
-
-          echo "===== PACKAGE.JSON CONTENT ====="
-
-          find analysis/app \
-            -name "package.json" \
-            -maxdepth 3 \
-            -exec sh -c '
-              echo
-              echo "======================================"
-              echo "FILE: $1"
-              echo "======================================"
-              cat "$1"
-            ' _ {} \;
-
-
-      # ==========================================
-      # 13. Tìm Electron version
-      # ==========================================
+      # ============================================================
+      # 12. Read Electron Framework Info.plist
+      # ============================================================
 
       - name: Detect Electron version
         run: |
+          set -e
 
-          echo "===== ELECTRON REFERENCES ====="
+          APP="extracted/Gunny PC.app"
+
+          PLIST="$APP/Contents/Frameworks/Electron Framework.framework/Versions/A/Resources/Info.plist"
+
+          echo "========================================"
+          echo "ELECTRON VERSION"
+          echo "========================================"
+
+          if [ -f "$PLIST" ]; then
+
+            echo
+            echo "===== Electron Info.plist ====="
+
+            plutil -p "$PLIST"
+
+            echo
+            echo "===== CFBundleShortVersionString ====="
+
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundleShortVersionString" \
+              "$PLIST" \
+              2>/dev/null \
+              || true
+
+            echo
+            echo "===== CFBundleVersion ====="
+
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundleVersion" \
+              "$PLIST" \
+              2>/dev/null \
+              || true
+
+            echo
+            echo "===== CFBundleIdentifier ====="
+
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundleIdentifier" \
+              "$PLIST" \
+              2>/dev/null \
+              || true
+
+          else
+            echo "Electron Info.plist not found."
+          fi
+
+
+      # ============================================================
+      # 13. Analyze current architecture
+      # ============================================================
+
+      - name: Analyze current architectures
+        run: |
+          set -e
+
+          APP="extracted/Gunny PC.app"
+
+          echo "========================================"
+          echo "CURRENT ARCHITECTURES"
+          echo "========================================"
+
+          find "$APP" \
+            -type f \
+            -print0 |
+          while IFS= read -r -d '' FILE; do
+
+            TYPE=$(file "$FILE")
+
+            case "$TYPE" in
+              *"Mach-O"*)
+                echo
+                echo "----------------------------------------"
+                echo "$FILE"
+                echo "$TYPE"
+                ;;
+            esac
+
+          done
+
+
+      # ============================================================
+      # 14. Check main executable with lipo
+      # ============================================================
+
+      - name: Check main executable
+        run: |
+          set -e
+
+          BIN="extracted/Gunny PC.app/Contents/MacOS/Gunny PC"
+
+          echo "========================================"
+          echo "MAIN EXECUTABLE"
+          echo "========================================"
+
+          if [ -f "$BIN" ]; then
+
+            echo
+            echo "file:"
+            file "$BIN"
+
+            echo
+            echo "lipo:"
+            lipo -info "$BIN" || true
+
+          else
+            echo "Main executable not found."
+          fi
+
+
+      # ============================================================
+      # 15. Locate app.asar
+      # ============================================================
+
+      - name: Locate app.asar
+        run: |
+          set -e
+
+          APP="extracted/Gunny PC.app"
+
+          echo "========================================"
+          echo "APP.ASAR"
+          echo "========================================"
+
+          find "$APP" \
+            -type f \
+            -name "app.asar" \
+            -print
+
+          if [ ! -f "$APP/Contents/Resources/app.asar" ]; then
+            echo
+            echo "ERROR: app.asar not found."
+            exit 1
+          fi
+
+          echo
+          echo "app.asar size:"
+
+          ls -lh \
+            "$APP/Contents/Resources/app.asar"
+
+
+      # ============================================================
+      # 16. Extract app.asar
+      # ============================================================
+
+      - name: Extract app.asar
+        run: |
+          set -e
+
+          ASAR="extracted/Gunny PC.app/Contents/Resources/app.asar"
+
+          mkdir -p analysis/app
+
+          echo "Extracting app.asar..."
+
+          asar extract \
+            "$ASAR" \
+            analysis/app
+
+          echo
+          echo "===== EXTRACTED app.asar ====="
+
+          find analysis/app \
+            -maxdepth 4 \
+            -print \
+            | sort \
+            | head -1000
+
+
+      # ============================================================
+      # 17. Locate main package.json
+      # ============================================================
+
+      - name: Locate package.json
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "PACKAGE.JSON FILES"
+          echo "========================================"
+
+          find analysis/app \
+            -name "package.json" \
+            -print \
+            | sort
+
+
+      # ============================================================
+      # 18. Read MAIN package.json
+      # ============================================================
+
+      - name: Read main package.json
+        run: |
+          set -e
+
+          PACKAGE="analysis/app/package.json"
+
+          echo "========================================"
+          echo "MAIN PACKAGE.JSON"
+          echo "========================================"
+
+          if [ -f "$PACKAGE" ]; then
+
+            cat "$PACKAGE"
+
+          else
+
+            echo "ERROR: analysis/app/package.json not found."
+
+          fi
+
+
+      # ============================================================
+      # 19. Extract Electron dependencies from package.json
+      # ============================================================
+
+      - name: Analyze Electron dependencies
+        run: |
+          set -e
+
+          PACKAGE="analysis/app/package.json"
+
+          echo "========================================"
+          echo "ELECTRON DEPENDENCIES"
+          echo "========================================"
+
+          if [ -f "$PACKAGE" ]; then
+
+            echo
+            echo "===== electron ====="
+
+            grep -n \
+              '"electron"' \
+              "$PACKAGE" \
+              || true
+
+            echo
+            echo "===== electron-builder ====="
+
+            grep -n \
+              '"electron-builder"' \
+              "$PACKAGE" \
+              || true
+
+            echo
+            echo "===== electron-updater ====="
+
+            grep -n \
+              '"electron-updater"' \
+              "$PACKAGE" \
+              || true
+
+          fi
+
+
+      # ============================================================
+      # 20. Search ALL package.json for Electron
+      # ============================================================
+
+      - name: Search all Electron references
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "ALL ELECTRON REFERENCES"
+          echo "========================================"
 
           grep -Rni \
-            -E '"electron"|"electron-builder"|"electron-packager"' \
+            -E \
+            '"electron"|"electron-builder"|"electron-updater"|"electron-packager"' \
             analysis/app \
             --include="package.json" \
-            2>/dev/null || true
+            2>/dev/null \
+            || true
 
 
-      # ==========================================
-      # 14. Tìm native modules
-      # ==========================================
+      # ============================================================
+      # 21. Find native .node modules
+      # ============================================================
 
-      - name: Find native modules
+      - name: Find native Node modules
         run: |
+          set -e
 
-          echo "===== NATIVE MODULES ====="
+          echo "========================================"
+          echo "NATIVE .NODE MODULES"
+          echo "========================================"
+
+          find analysis/app \
+            -type f \
+            -name "*.node" \
+            -print \
+            | sort
+
+          COUNT=$(find analysis/app \
+            -type f \
+            -name "*.node" \
+            | wc -l \
+            | tr -d ' ')
+
+          echo
+          echo "Native .node module count: $COUNT"
+
+
+      # ============================================================
+      # 22. Find dylib files inside app.asar
+      # ============================================================
+
+      - name: Find native dylibs
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "DYLIB FILES"
+          echo "========================================"
+
+          find analysis/app \
+            -type f \
+            -name "*.dylib" \
+            -print \
+            | sort
+
+
+      # ============================================================
+      # 23. Find executables inside app.asar
+      # ============================================================
+
+      - name: Find executables inside app.asar
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "EXECUTABLES INSIDE APP.ASAR"
+          echo "========================================"
+
+          find analysis/app \
+            -type f \
+            -perm -111 \
+            -print \
+            | sort
+
+
+      # ============================================================
+      # 24. Search launcher scripts
+      # ============================================================
+
+      - name: Find launcher JavaScript files
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "JAVASCRIPT FILES"
+          echo "========================================"
 
           find analysis/app \
             -type f \
             \( \
-              -name "*.node" \
-              -o -name "*.dylib" \
+              -name "*.js" \
+              -o -name "*.mjs" \
             \) \
-            -print
+            -print \
+            | sort \
+            | head -1000
 
 
-      # ==========================================
-      # 15. Tìm các file executable
-      # ==========================================
+      # ============================================================
+      # 25. Search URLs and server configuration
+      # ============================================================
 
-      - name: Find executables
+      - name: Search URLs and server configuration
         run: |
+          set -e
 
-          echo "===== EXECUTABLE FILES ====="
-
-          find analysis/app \
-            -type f \
-            -perm -111 \
-            -print
-
-
-      # ==========================================
-      # 16. Tìm URL / server / launcher logic
-      # ==========================================
-
-      - name: Search launcher configuration
-        run: |
-
-          echo "===== URL / SERVER REFERENCES ====="
+          echo "========================================"
+          echo "URL / SERVER / UPDATE REFERENCES"
+          echo "========================================"
 
           grep -Rni \
-            -E 'https?://|wss?://|api|server|download|update' \
+            -E \
+            'https?://|wss?://|download|update|server|api' \
             analysis/app \
             --exclude-dir=node_modules \
             2>/dev/null \
-            | head -300 \
+            | head -500 \
             || true
 
 
-      # ==========================================
-      # 17. Tạo báo cáo
-      # ==========================================
+      # ============================================================
+      # 26. Search Electron Builder configuration
+      # ============================================================
 
-      - name: Create analysis report
+      - name: Search build configuration
         run: |
+          set -e
 
+          echo "========================================"
+          echo "BUILD CONFIGURATION"
+          echo "========================================"
+
+          find analysis/app \
+            -maxdepth 3 \
+            -type f \
+            \( \
+              -name "*.json" \
+              -o -name "*.yaml" \
+              -o -name "*.yml" \
+              -o -name "*.js" \
+            \) \
+            -print \
+            | sort
+
+          echo
+          echo "===== BUILD REFERENCES ====="
+
+          grep -Rni \
+            -E \
+            'electron-builder|electron-packager|build|darwin|mac|x64|arm64' \
+            analysis/app \
+            --exclude-dir=node_modules \
+            2>/dev/null \
+            | head -500 \
+            || true
+
+
+      # ============================================================
+      # 27. Inspect Electron Framework architecture
+      # ============================================================
+
+      - name: Inspect Electron Framework binaries
+        run: |
+          set -e
+
+          FRAMEWORK="extracted/Gunny PC.app/Contents/Frameworks/Electron Framework.framework"
+
+          echo "========================================"
+          echo "ELECTRON FRAMEWORK ARCHITECTURE"
+          echo "========================================"
+
+          find "$FRAMEWORK" \
+            -type f \
+            -print0 |
+          while IFS= read -r -d '' FILE; do
+
+            TYPE=$(file "$FILE")
+
+            case "$TYPE" in
+              *"Mach-O"*)
+                echo
+                echo "$FILE"
+                echo "$TYPE"
+                ;;
+            esac
+
+          done
+
+
+      # ============================================================
+      # 28. Inspect Framework versions
+      # ============================================================
+
+      - name: Inspect framework metadata
+        run: |
+          set -e
+
+          FRAMEWORK="extracted/Gunny PC.app/Contents/Frameworks/Electron Framework.framework"
+
+          echo "========================================"
+          echo "FRAMEWORK METADATA"
+          echo "========================================"
+
+          find "$FRAMEWORK" \
+            -maxdepth 4 \
+            -name "Info.plist" \
+            -print
+
+
+      # ============================================================
+      # 29. Check Squirrel
+      # ============================================================
+
+      - name: Analyze Squirrel
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "SQUIRREL"
+          echo "========================================"
+
+          find "extracted/Gunny PC.app/Contents/Frameworks" \
+            -type f \
+            \( \
+              -name "Squirrel" \
+              -o -name "ShipIt" \
+            \) \
+            -print0 |
+          while IFS= read -r -d '' FILE; do
+
+            echo
+            echo "$FILE"
+            file "$FILE"
+            lipo -info "$FILE" 2>/dev/null || true
+
+          done
+
+
+      # ============================================================
+      # 30. Create complete report
+      # ============================================================
+
+      - name: Create complete analysis report
+        run: |
+          set -e
+
+          APP="extracted/Gunny PC.app"
+          PACKAGE="analysis/app/package.json"
           REPORT="analysis/report.txt"
 
           echo "========================================" > "$REPORT"
-          echo "GUNNY PC ANALYSIS" >> "$REPORT"
+          echo "GUNNY PC COMPLETE ANALYSIS" >> "$REPORT"
           echo "========================================" >> "$REPORT"
+
+          echo >> "$REPORT"
+          echo "===== RUNNER =====" >> "$REPORT"
+
+          uname -a >> "$REPORT"
+          echo "Architecture: $(uname -m)" >> "$REPORT"
+          echo "Node architecture: $(node -p 'process.arch')" >> "$REPORT"
+
 
           echo >> "$REPORT"
           echo "===== APPLICATION =====" >> "$REPORT"
 
-          find "extracted/Gunny PC.app" \
-            -maxdepth 2 \
-            -print >> "$REPORT"
+          echo "Path: $APP" >> "$REPORT"
+
+          if [ -f "$APP/Contents/Info.plist" ]; then
+
+            echo >> "$REPORT"
+            echo "--- Info.plist ---" >> "$REPORT"
+
+            plutil -p \
+              "$APP/Contents/Info.plist" \
+              >> "$REPORT" \
+              2>&1 || true
+
+          fi
 
 
           echo >> "$REPORT"
-          echo "===== ELECTRON =====" >> "$REPORT"
+          echo "===== ELECTRON FRAMEWORK =====" >> "$REPORT"
 
-          find "extracted/Gunny PC.app" \
-            -name "Electron Framework.framework" \
-            -print >> "$REPORT"
+          FRAMEWORK="$APP/Contents/Frameworks/Electron Framework.framework"
+
+          if [ -d "$FRAMEWORK" ]; then
+
+            echo "Path: $FRAMEWORK" >> "$REPORT"
+
+            PLIST="$FRAMEWORK/Versions/A/Resources/Info.plist"
+
+            if [ -f "$PLIST" ]; then
+
+              echo >> "$REPORT"
+              echo "--- Electron Info.plist ---" >> "$REPORT"
+
+              plutil -p \
+                "$PLIST" \
+                >> "$REPORT" \
+                2>&1 || true
+
+            fi
+
+          fi
 
 
           echo >> "$REPORT"
-          echo "===== PACKAGE.JSON =====" >> "$REPORT"
+          echo "===== MAIN PACKAGE.JSON =====" >> "$REPORT"
 
-          find analysis/app \
-            -name "package.json" \
-            -print >> "$REPORT"
+          if [ -f "$PACKAGE" ]; then
+            cat "$PACKAGE" >> "$REPORT"
+          else
+            echo "package.json not found." >> "$REPORT"
+          fi
 
 
           echo >> "$REPORT"
-          echo "===== NATIVE MODULES =====" >> "$REPORT"
+          echo "===== NATIVE .NODE MODULES =====" >> "$REPORT"
 
           find analysis/app \
             -type f \
-            \( \
-              -name "*.node" \
-              -o -name "*.dylib" \
-            \) \
-            -print >> "$REPORT"
+            -name "*.node" \
+            -print \
+            >> "$REPORT"
 
 
           echo >> "$REPORT"
-          echo "===== EXECUTABLES =====" >> "$REPORT"
+          echo "===== DYLIBS IN APP.ASAR =====" >> "$REPORT"
 
           find analysis/app \
             -type f \
-            -perm -111 \
-            -print >> "$REPORT"
-
-
-          echo >> "$REPORT"
-          echo "===== ARCHITECTURES =====" >> "$REPORT"
-
-          find "extracted/Gunny PC.app" \
-            -type f \
-            -perm -111 \
-            -exec file {} \; >> "$REPORT"
+            -name "*.dylib" \
+            -print \
+            >> "$REPORT"
 
 
           echo >> "$REPORT"
           echo "===== ELECTRON REFERENCES =====" >> "$REPORT"
 
           grep -Rni \
-            -E '"electron"|"electron-builder"|"electron-packager"' \
+            -E \
+            '"electron"|"electron-builder"|"electron-updater"|"electron-packager"' \
             analysis/app \
             --include="package.json" \
             2>/dev/null \
@@ -332,31 +896,92 @@ jobs:
             || true
 
 
+          echo >> "$REPORT"
+          echo "===== CURRENT MACH-O ARCHITECTURES =====" >> "$REPORT"
+
+          find "$APP" \
+            -type f \
+            -print0 |
+          while IFS= read -r -d '' FILE; do
+
+            TYPE=$(file "$FILE")
+
+            case "$TYPE" in
+              *"Mach-O"*)
+                echo "$TYPE" >> "$REPORT"
+                ;;
+            esac
+
+          done
+
+
+          echo >> "$REPORT"
+          echo "===== URL / SERVER REFERENCES =====" >> "$REPORT"
+
+          grep -Rni \
+            -E \
+            'https?://|wss?://|download|update|server|api' \
+            analysis/app \
+            --exclude-dir=node_modules \
+            2>/dev/null \
+            | head -500 \
+            >> "$REPORT" \
+            || true
+
+
+          echo >> "$REPORT"
+          echo "===== BUILD REFERENCES =====" >> "$REPORT"
+
+          grep -Rni \
+            -E \
+            'electron-builder|electron-packager|darwin|mac|x64|arm64' \
+            analysis/app \
+            --exclude-dir=node_modules \
+            2>/dev/null \
+            | head -500 \
+            >> "$REPORT" \
+            || true
+
+
           echo
           echo "========================================"
-          echo "REPORT"
+          echo "ANALYSIS COMPLETE"
           echo "========================================"
 
           cat "$REPORT"
 
 
-      # ==========================================
-      # 18. Upload app.asar đã giải nén
-      # ==========================================
-
-      - name: Upload app.asar analysis
-        uses: actions/upload-artifact@v4
-        with:
-          name: gunny-app-asar-analysis
-          path: analysis/app/
-
-
-      # ==========================================
-      # 19. Upload báo cáo
-      # ==========================================
+      # ============================================================
+      # 31. Upload report
+      # ============================================================
 
       - name: Upload analysis report
         uses: actions/upload-artifact@v4
         with:
           name: gunny-analysis-report
           path: analysis/report.txt
+          retention-days: 7
+
+
+      # ============================================================
+      # 32. Upload extracted app.asar
+      # ============================================================
+
+      - name: Upload extracted app.asar
+        uses: actions/upload-artifact@v4
+        with:
+          name: gunny-app-asar-analysis
+          path: analysis/app/
+          retention-days: 7
+
+
+      # ============================================================
+      # 33. Upload original application
+      # ============================================================
+
+      - name: Upload original Gunny PC.app
+        uses: actions/upload-artifact@v4
+        with:
+          name: gunny-original-app
+          path: extracted/Gunny PC.app/
+          retention-days: 7
