@@ -326,178 +326,214 @@ jobs:
           export MAIN
 
           python3 <<'PY'
-                    import os
-                    import re
-                    from pathlib import Path
-          
-                    p = Path(os.environ["MAIN"])
-                    s = p.read_text(encoding="utf-8-sig")
-          
-                    # Disable bundled Pepper Flash selection.
-                    s, flash_count = re.subn(
-                        r"(\bconst\s+flashPath\s*=\s*)findFlashPath\s*\(\s*\)\s*;",
-                        r"\1null;",
-                        s,
-                        count=1
-                    )
-          
-                    if flash_count != 1:
-                        raise SystemExit(
-                            "ERROR: const flashPath = findFlashPath(); not found."
-                        )
-          
-                    # Remove native PPAPI switches.
-                    s = re.sub(
-                        r"""
-                        [A-Za-z0-9_$.\[\]]+
-                        \.appendSwitch
-                        \s*\(
-                        \s*['"]ppapi-flash-path['"]
-                        \s*,[\s\S]*?
-                        \)
-                        \s*;
-                        """,
-                        "",
-                        s,
-                        flags=re.IGNORECASE | re.VERBOSE
-                    )
-          
-                    s = re.sub(
-                        r"""
-                        [A-Za-z0-9_$.\[\]]+
-                        \.appendSwitch
-                        \s*\(
-                        \s*['"]ppapi-flash-version['"]
-                        \s*,[\s\S]*?
-                        \)
-                        \s*;
-                        """,
-                        "",
-                        s,
-                        flags=re.IGNORECASE | re.VERBOSE
-                    )
-          
-                    # Remove old Flash-specific deployment/telemetry.
-                    s = re.sub(
-                        r"(?m)^[ \t]*_deployFlashMmsCfg\s*\([^;]*\)\s*;[^\n]*\n?",
-                        "",
-                        s
-                    )
-          
-                    s = re.sub(
-                        r"(?m)^[^\n]*flash_not_found[^\n]*\n?",
-                        "",
-                        s
-                    )
-          
-                    # Patch ONLY createGameWindow().
-                    start = s.find("function createGameWindow")
-          
-                    if start == -1:
-                        raise SystemExit(
-                            "ERROR: createGameWindow() not found."
-                        )
-          
-                    next_function = re.search(
-                        r"(?m)^(?:function|async\s+function|const\s+\w+\s*=|let\s+\w+\s*=|var\s+\w+\s*=)",
-                        s[start + 20:]
-                    )
-          
-                    end = (
-                        start + 20 + next_function.start()
-                        if next_function
-                        else len(s)
-                    )
-          
-                    game = s[start:end]
-          
-                    if "new BrowserWindow" not in game:
-                        raise SystemExit(
-                            "ERROR: BrowserWindow not found inside createGameWindow()."
-                        )
-          
-                    # IMPORTANT:
-                    # Keep contextIsolation TRUE.
-                    # The real Gunny preload uses contextBridge.
-                    #
-                    # Disable ONLY sandbox for the game window so the
-                    # Ruffle preload can use fs/path.
-                    #
-                    game, sandbox_count = re.subn(
-                        r"(\bsandbox\s*:\s*)true",
-                        r"\1false",
-                        game,
-                        count=1
-                    )
-          
-                    if sandbox_count == 0:
-                        # Insert sandbox:false after webPreferences:{.
-                        game, inserted = re.subn(
-                            r"(webPreferences\s*:\s*\{)",
-                            r"\1\n      sandbox: false,",
-                            game,
-                            count=1
-                        )
-          
-                        if inserted != 1:
-                            raise SystemExit(
-                                "ERROR: game webPreferences block not found."
-                            )
-          
-                    # Keep plugins enabled if the source explicitly disables them.
-                    game = re.sub(
-                        r"(\bplugins\s*:\s*)false",
-                        r"\1true",
-                        game,
-                        count=1
-                    )
-          
-                    # Replace the exact packaged/dev preload ternary safely.
-                    preload_ternary = re.compile(
-                        r"""
-                        \bpreload\s*:\s*
-                        app\.isPackaged
-                        \s*\?\s*
-                        path\.join\(
-                            [\s\S]*?
-                        \)
-                        \s*:\s*
-                        path\.join\(
-                            [\s\S]*?
-                        \)
-                        \s*,?
-                        """,
-                        re.IGNORECASE | re.VERBOSE
-                    )
-          
-                    game, preload_count = preload_ternary.subn(
-                        """preload: path.join(
-                    process.resourcesPath,
-                    'preload-ruffle.js'
-                  ),""",
-                        game,
-                        count=1
-                    )
-          
-                    if preload_count != 1:
-                        raise SystemExit(
-                            "ERROR: packaged/dev game preload ternary not found."
-                        )
-          
-                    s = s[:start] + game + s[end:]
-          
-                    p.write_text(s, encoding="utf-8")
-          
-                    print("main.js patched.")
-                    print("flashPath replaced:", flash_count)
-                    print("sandbox:true replaced/inserted:", sandbox_count)
-                    print("game preload replaced:", preload_count)
+          import os
+          import re
+          from pathlib import Path
+
+          p = Path(os.environ["MAIN"])
+          s = p.read_text(encoding="utf-8-sig")
+
+          # Disable bundled Pepper Flash selection.
+          s, flash_count = re.subn(
+              r"(\bconst\s+flashPath\s*=\s*)findFlashPath\s*\(\s*\)\s*;",
+              r"\1null;",
+              s,
+              count=1
+          )
+
+          if flash_count != 1:
+              raise SystemExit(
+                  "ERROR: const flashPath = findFlashPath(); not found."
+              )
+
+          # Remove native PPAPI switches.
+          s = re.sub(
+              r"""
+              [A-Za-z0-9_$.\[\]]+
+              \.appendSwitch
+              \s*\(
+              \s*['"]ppapi-flash-path['"]
+              \s*,[\s\S]*?
+              \)
+              \s*;
+              """,
+              "",
+              s,
+              flags=re.IGNORECASE | re.VERBOSE
+          )
+
+          s = re.sub(
+              r"""
+              [A-Za-z0-9_$.\[\]]+
+              \.appendSwitch
+              \s*\(
+              \s*['"]ppapi-flash-version['"]
+              \s*,[\s\S]*?
+              \)
+              \s*;
+              """,
+              "",
+              s,
+              flags=re.IGNORECASE | re.VERBOSE
+          )
+
+          # Remove old Flash-specific deployment.
+          s = re.sub(
+              r"(?m)^[ \t]*_deployFlashMmsCfg\s*\([^;]*\)\s*;[^\n]*\n?",
+              "",
+              s
+          )
+
+          # Remove Flash-not-found telemetry.
+          s = re.sub(
+              r"(?m)^[^\n]*flash_not_found[^\n]*\n?",
+              "",
+              s
+          )
+
+          # --------------------------------------------------
+          # Patch ONLY createGameWindow().
+          # --------------------------------------------------
+
+          start = s.find("function createGameWindow")
+
+          if start == -1:
+              raise SystemExit(
+                  "ERROR: createGameWindow() not found."
+              )
+
+          next_function = re.search(
+              r"(?m)^(?:function|async\s+function|const\s+\w+\s*=|let\s+\w+\s*=|var\s+\w+\s*=)",
+              s[start + 20:]
+          )
+
+          if next_function:
+              end = (
+                  start
+                  + 20
+                  + next_function.start()
+              )
+          else:
+              end = len(s)
+
+          game = s[start:end]
+
+          if "new BrowserWindow" not in game:
+              raise SystemExit(
+                  "ERROR: BrowserWindow not found inside createGameWindow()."
+              )
+
+          # Keep contextIsolation TRUE.
+          # The original Gunny preload uses contextBridge.
+
+          # Disable sandbox ONLY for game window.
+          game, sandbox_count = re.subn(
+              r"(\bsandbox\s*:\s*)true",
+              r"\1false",
+              game,
+              count=1
+          )
+
+          if sandbox_count == 0:
+
+              game, inserted = re.subn(
+                  r"(webPreferences\s*:\s*\{)",
+                  r"\1\n        sandbox: false,",
+                  game,
+                  count=1
+              )
+
+              if inserted != 1:
+                  raise SystemExit(
+                      "ERROR: game webPreferences block not found."
+                  )
+
+          # Keep Chromium plugins enabled.
+          game = re.sub(
+              r"(\bplugins\s*:\s*)false",
+              r"\1true",
+              game,
+              count=1
+          )
+
+          # --------------------------------------------------
+          # Replace Gunny's packaged/dev preload expression.
+          #
+          # Original:
+          #
+          # preload: app.isPackaged
+          #   ? path.join(process.resourcesPath, 'preload.js')
+          #   : path.join(__dirname, 'preload.js'),
+          #
+          # --------------------------------------------------
+
+          preload_ternary = re.compile(
+              r"""
+              \bpreload\s*:\s*
+              app\.isPackaged
+              \s*\?\s*
+              path\.join\(
+                  [\s\S]*?
+              \)
+              \s*:\s*
+              path\.join\(
+                  [\s\S]*?
+              \)
+              \s*,?
+              """,
+              re.IGNORECASE | re.VERBOSE
+          )
+
+          game, preload_count = preload_ternary.subn(
+              """preload: path.join(
+                  process.resourcesPath,
+                  'preload-ruffle.js'
+                ),""",
+              game,
+              count=1
+          )
+
+          if preload_count != 1:
+              raise SystemExit(
+                  "ERROR: packaged/dev game preload ternary not found."
+              )
+
+          s = (
+              s[:start]
+              + game
+              + s[end:]
+          )
+
+          p.write_text(
+              s,
+              encoding="utf-8"
+          )
+
+          print("main.js patched.")
+          print(
+              "flashPath replaced:",
+              flash_count
+          )
+          print(
+              "sandbox:true replaced/inserted:",
+              sandbox_count
+          )
+          print(
+              "game preload replaced:",
+              preload_count
+          )
           PY
 
-          node --check "$MAIN"
+          echo
+          echo "Checking JavaScript syntax..."
+
+          node \
+            --check \
+            "$MAIN"
 
           echo
           echo "Patched game window:"
+
           grep -n \
             -A35 \
             -B5 \
@@ -507,6 +543,7 @@ jobs:
 
           echo
           echo "PPAPI switches remaining:"
+
           grep -niE \
             "ppapi-flash-path|ppapi-flash-version" \
             "$MAIN" \
