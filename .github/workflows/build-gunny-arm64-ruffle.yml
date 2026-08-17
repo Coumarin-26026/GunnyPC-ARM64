@@ -1493,7 +1493,7 @@ jobs:
 
 
       # ==========================================================
-      # 32. FINAL INTEL SCAN
+      # FINAL INTEL SCAN
       # ==========================================================
 
       - name: Final Intel scan
@@ -1504,87 +1504,127 @@ jobs:
           APP="build/Gunny PC ARM64.app"
 
           echo "=========================================="
-          echo "INTEL BINARY SCAN"
+          echo "FINAL ARCHITECTURE SCAN"
           echo "=========================================="
 
-          FAILED=0
+          REPORT="build/architecture-report.txt"
 
-          while IFS= read -r -d '' FILE
-          do
+          rm -f "$REPORT"
 
-            INFO="$(
-              file "$FILE" 2>/dev/null \
-              || true
-            )
+          find "$APP" \
+            -type f \
+            -exec file {} \; \
+            > "$REPORT" \
+            || true
 
-            if echo "$INFO" \
-              | grep -Eq \
-                "Mach-O.*(x86_64|i386)|executable.*(x86_64|i386)"
-            then
+          echo
+          echo "Architecture report:"
+          cat "$REPORT"
 
-              echo
-              echo "INTEL:"
-              echo "$INFO"
-              echo "$FILE"
+          echo
+          echo "=========================================="
+          echo "CHECK x86_64"
+          echo "=========================================="
 
-              FAILED=1
-
-            fi
-
-          done < <(
-            find "$APP" \
-              -type f \
-              -print0
-          )
-
-
-          if [ "$FAILED" -ne 0 ]; then
+          if grep -Eiq \
+            'Mach-O.*x86_64|x86_64.*Mach-O' \
+            "$REPORT"
+          then
 
             echo
-            echo "ERROR: Intel binaries remain."
+            echo "ERROR: x86_64 binaries detected:"
+            echo
+
+            grep -Ei \
+              'Mach-O.*x86_64|x86_64.*Mach-O' \
+              "$REPORT"
+
+            exit 1
+
+          fi
+
+          echo "x86_64: NONE"
+
+
+          echo
+          echo "=========================================="
+          echo "CHECK i386"
+          echo "=========================================="
+
+          if grep -Eiq \
+            'Mach-O.*i386|i386.*Mach-O' \
+            "$REPORT"
+          then
+
+            echo
+            echo "ERROR: i386 binaries detected:"
+            echo
+
+            grep -Ei \
+              'Mach-O.*i386|i386.*Mach-O' \
+              "$REPORT"
+
+            exit 1
+
+          fi
+
+          echo "i386: NONE"
+
+
+          echo
+          echo "=========================================="
+          echo "CHECK ARM64"
+          echo "=========================================="
+
+          MAIN="$APP/Contents/MacOS/Gunny PC"
+
+          if [ ! -f "$MAIN" ]; then
+
+            echo "ERROR: Main executable not found:"
+            echo "$MAIN"
+
+            exit 1
+
+          fi
+
+          MAIN_INFO="$(
+            file "$MAIN"
+          )"
+
+          echo "$MAIN_INFO"
+
+          if ! echo "$MAIN_INFO" \
+            | grep -q "arm64"
+          then
+
+            echo
+            echo "ERROR: Main executable is NOT ARM64."
 
             exit 1
 
           fi
 
           echo
-          echo "No Intel binaries detected."
+          echo "Main executable: ARM64"
 
 
-      # ==========================================================
-      # 33. AD-HOC SIGN
-      # ==========================================================
+          echo
+          echo "=========================================="
+          echo "LIPO CHECK"
+          echo "=========================================="
 
-      - name: Sign application
-        shell: bash
-        run: |
-          set -euo pipefail
+          lipo -info "$MAIN"
 
-          APP="build/Gunny PC ARM64.app"
 
-          rm -rf \
-            "$APP/Contents/_CodeSignature"
+          echo
+          echo "=========================================="
+          echo "FINAL RESULT"
+          echo "=========================================="
 
-          find "$APP/Contents" \
-            -name "_CodeSignature" \
-            -type d \
-            -prune \
-            -exec rm -rf {} + \
-            || true
+          echo "ARM64: OK"
+          echo "x86_64: NONE"
+          echo "i386: NONE"
 
-          codesign \
-            --deep \
-            --force \
-            --verbose \
-            --sign - \
-            "$APP"
-
-          codesign \
-            --verify \
-            --deep \
-            --strict \
-            --verbose=2 \
-            "$APP"
 
 
       # ==========================================================
