@@ -1061,18 +1061,17 @@ jobs:
       - name: Verify final app.asar
         shell: bash
         run: |
-          
           set -euo pipefail
-          
+
           APP="build/Gunny PC ARM64.app"
           ASAR="$APP/Contents/Resources/app.asar"
-          
+
           rm -rf build/final-source
-          
+
           asar extract \
             "$ASAR" \
             build/final-source
-          
+
           MAIN="$(
             find build/final-source \
               -type f \
@@ -1080,34 +1079,90 @@ jobs:
               -print \
               | head -n 1
           )"
-          
+
           if [ -z "$MAIN" ]; then
             echo "ERROR: final main.js not found."
             exit 1
           fi
-          
+
+          echo "Final main.js:"
+          echo "$MAIN"
+
+          echo
+          echo "Checking JavaScript syntax..."
+
           node \
             --check \
             "$MAIN"
-          
-          echo "Final main.js syntax: OK"
-          
+
           echo
-          echo "Game preload reference:"
+          echo "Final main.js syntax: OK"
+
+          echo
+          echo "=========================================="
+          echo "GAME WINDOW SEARCH"
+          echo "=========================================="
+
           grep -n \
             -A40 \
-            "function createGameWindow" \
+            -B5 \
+            "createGameWindow" \
             "$MAIN" \
-            | head -120
-          
+            | head -120 \
+            || true
+
           echo
-          echo "PPAPI references:"
+          echo "=========================================="
+          echo "BROWSERWINDOW SEARCH"
+          echo "=========================================="
+
+          grep -n \
+            -A30 \
+            -B5 \
+            "BrowserWindow" \
+            "$MAIN" \
+            | head -150 \
+            || true
+
+          echo
+          echo "=========================================="
+          echo "PRELOAD SEARCH"
+          echo "=========================================="
+
+          grep -n \
+            -A10 \
+            -B10 \
+            "preload-ruffle.js" \
+            "$MAIN" \
+            | head -100 \
+            || true
+
+          echo
+          echo "=========================================="
+          echo "PPAPI REFERENCES"
+          echo "=========================================="
+
           grep -RniE \
             "ppapi-flash-path|ppapi-flash-version" \
             build/final-source \
             2>/dev/null \
             | head -50 \
             || true
+
+          echo
+          echo "=========================================="
+          echo "FLASH REFERENCES"
+          echo "=========================================="
+
+          grep -RniE \
+            "findFlashPath|PepperFlashPlayer|flash_not_found|Loading\.swf|setFlashFocus" \
+            build/final-source \
+            2>/dev/null \
+            | head -200 \
+            || true
+
+          echo
+          echo "Final app.asar verification: OK"
 
       - name: Smoke-test startup and preloads
         shell: bash
