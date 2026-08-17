@@ -1,0 +1,798 @@
+name: Build Gunny PC ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ELECTRON_VERSION: "11.4.4"
+  APP_NAME: "Gunny PC"
+  DRIVE_URL: "https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b"
+
+jobs:
+  build-arm64:
+    name: Build Gunny ARM64
+    runs-on: macos-14
+
+    steps:
+
+      # =========================================================
+      # 1. Checkout
+      # =========================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # =========================================================
+      # 2. Install tools
+      # =========================================================
+
+      - name: Install tools
+        run: |
+          set -e
+
+          brew install p7zip
+
+          npm install -g @electron/asar
+
+          echo "Node:"
+          node --version
+
+          echo "npm:"
+          npm --version
+
+          echo "asar:"
+          asar --version || true
+
+
+      # =========================================================
+      # 3. Runner
+      # =========================================================
+
+      - name: Show runner architecture
+        run: |
+          echo "========================================"
+          echo "RUNNER"
+          echo "========================================"
+
+          uname -a
+
+          echo
+          echo "Architecture:"
+          uname -m
+
+          echo
+          echo "CPU:"
+          sysctl -n machdep.cpu.brand_string || true
+
+
+      # =========================================================
+      # 4. Create directories
+      # =========================================================
+
+      - name: Create build directories
+        run: |
+          set -e
+
+          rm -rf download
+          rm -rf extracted
+          rm -rf build
+          rm -rf output
+
+          mkdir -p download
+          mkdir -p extracted
+          mkdir -p build
+          mkdir -p output
+
+
+      # =========================================================
+      # 5. Download original Gunny
+      # =========================================================
+
+      - name: Download Gunny Intel build
+        run: |
+          set -e
+
+          echo "Downloading Gunny..."
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            "$DRIVE_URL" \
+            -o download/gunny.zip
+
+          echo
+          echo "===== FILE ====="
+
+          ls -lh download/gunny.zip
+
+          file download/gunny.zip
+
+          echo
+          echo "===== ZIP TEST ====="
+
+          unzip -t download/gunny.zip
+
+
+      # =========================================================
+      # 6. Extract original application
+      # =========================================================
+
+      - name: Extract Gunny
+        run: |
+          set -e
+
+          unzip \
+            -q \
+            -o \
+            download/gunny.zip \
+            -d extracted
+
+          rm -rf extracted/__MACOSX
+
+          echo
+          echo "===== APPLICATIONS ====="
+
+          find extracted \
+            -type d \
+            -name "*.app" \
+            -print
+
+
+      # =========================================================
+      # 7. Verify Gunny
+      # =========================================================
+
+      - name: Verify original Gunny
+        run: |
+          set -e
+
+          APP="extracted/Gunny PC.app"
+
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: Gunny PC.app not found."
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$APP"
+
+          echo
+          echo "Main executable:"
+
+          file "$APP/Contents/MacOS/Gunny PC"
+
+
+      # =========================================================
+      # 8. Backup original app.asar
+      # =========================================================
+
+      - name: Backup original app.asar
+        run: |
+          set -e
+
+          cp \
+            "extracted/Gunny PC.app/Contents/Resources/app.asar" \
+            build/app.asar
+
+          ls -lh build/app.asar
+
+
+      # =========================================================
+      # 9. Download Electron ARM64
+      # =========================================================
+
+      - name: Download Electron ARM64
+        run: |
+          set -e
+
+          VERSION="$ELECTRON_VERSION"
+
+          URL="https://github.com/electron/electron/releases/download/v${VERSION}/electron-v${VERSION}-darwin-arm64.zip"
+
+          echo "Electron:"
+          echo "$VERSION"
+
+          echo
+          echo "URL:"
+          echo "$URL"
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            "$URL" \
+            -o build/electron-arm64.zip
+
+          echo
+          echo "===== ELECTRON ZIP ====="
+
+          ls -lh build/electron-arm64.zip
+
+          file build/electron-arm64.zip
+
+
+      # =========================================================
+      # 10. Extract Electron ARM64
+      # =========================================================
+
+      - name: Extract Electron ARM64
+        run: |
+          set -e
+
+          mkdir -p build/electron
+
+          unzip \
+            -q \
+            -o \
+            build/electron-arm64.zip \
+            -d build/electron
+
+          echo
+          echo "===== ELECTRON ====="
+
+          find build/electron \
+            -maxdepth 4 \
+            -print \
+            | sort
+
+
+      # =========================================================
+      # 11. Locate Electron.app
+      # =========================================================
+
+      - name: Locate Electron ARM64 app
+        run: |
+          set -e
+
+          ELECTRON_APP=$(find build/electron \
+            -type d \
+            -name "Electron.app" \
+            -print \
+            | head -1)
+
+          if [ -z "$ELECTRON_APP" ]; then
+            echo "ERROR: Electron.app not found."
+            exit 1
+          fi
+
+          echo "$ELECTRON_APP" > build/electron_app_path.txt
+
+          echo "Electron app:"
+          cat build/electron_app_path.txt
+
+
+      # =========================================================
+      # 12. Verify Electron is ARM64
+      # =========================================================
+
+      - name: Verify Electron ARM64
+        run: |
+          set -e
+
+          ELECTRON_APP=$(cat build/electron_app_path.txt)
+
+          echo "========================================"
+          echo "ELECTRON ARM64 CHECK"
+          echo "========================================"
+
+          file \
+            "$ELECTRON_APP/Contents/MacOS/Electron"
+
+          lipo -info \
+            "$ELECTRON_APP/Contents/MacOS/Electron"
+
+
+      # =========================================================
+      # 13. Replace Electron Resources with Gunny app.asar
+      # =========================================================
+
+      - name: Install Gunny app.asar into Electron ARM64
+        run: |
+          set -e
+
+          ELECTRON_APP=$(cat build/electron_app_path.txt)
+
+          RESOURCES="$ELECTRON_APP/Contents/Resources"
+
+          rm -rf "$RESOURCES/default_app.asar"
+
+          rm -rf "$RESOURCES/app"
+
+          rm -f "$RESOURCES/app.asar"
+
+          cp \
+            build/app.asar \
+            "$RESOURCES/app.asar"
+
+          echo
+          echo "Installed Gunny app.asar."
+
+          ls -lh \
+            "$RESOURCES/app.asar"
+
+
+      # =========================================================
+      # 14. Rename Electron application
+      # =========================================================
+
+      - name: Rebrand Electron as Gunny PC
+        run: |
+          set -e
+
+          ELECTRON_APP=$(cat build/electron_app_path.txt)
+
+          NEW_APP="build/Gunny PC ARM64.app"
+
+          cp -R \
+            "$ELECTRON_APP" \
+            "$NEW_APP"
+
+          echo "$NEW_APP" > build/gunny_app_path.txt
+
+          echo "Created:"
+          echo "$NEW_APP"
+
+
+      # =========================================================
+      # 15. Rename main executable
+      # =========================================================
+
+      - name: Rename Electron executable
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          cd "$APP/Contents/MacOS"
+
+          mv Electron "Gunny PC"
+
+          echo "Renamed main executable."
+
+
+      # =========================================================
+      # 16. Rename Electron helper applications
+      # =========================================================
+
+      - name: Rename Electron helpers
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          FRAMEWORKS="$APP/Contents/Frameworks"
+
+          echo "===== FRAMEWORKS ====="
+
+          find "$FRAMEWORKS" \
+            -maxdepth 2 \
+            -type d \
+            -name "*.app" \
+            -print
+
+
+      # =========================================================
+      # 17. Copy original Flash plugin
+      # =========================================================
+
+      - name: Copy original Pepper Flash
+        run: |
+          set -e
+
+          SOURCE="extracted/Gunny PC.app/Contents/Resources/plugins"
+
+          DEST="build/Gunny PC ARM64.app/Contents/Resources/plugins"
+
+          if [ -d "$SOURCE" ]; then
+
+            rm -rf "$DEST"
+
+            cp -R \
+              "$SOURCE" \
+              "$DEST"
+
+            echo "Pepper Flash copied."
+
+          else
+
+            echo "Pepper Flash directory not found."
+
+          fi
+
+
+      # =========================================================
+      # 18. Analyze Pepper Flash
+      # =========================================================
+
+      - name: Check Pepper Flash architecture
+        run: |
+          set -e
+
+          FLASH="build/Gunny PC ARM64.app/Contents/Resources/plugins/PepperFlashPlayer.plugin"
+
+          echo "========================================"
+          echo "PEPPER FLASH ARCHITECTURE"
+          echo "========================================"
+
+          if [ ! -d "$FLASH" ]; then
+
+            echo "Pepper Flash not found."
+
+            exit 0
+
+          fi
+
+          find "$FLASH" \
+            -type f \
+            -print0 |
+          while IFS= read -r -d '' FILE; do
+
+            TYPE=$(file "$FILE")
+
+            if echo "$TYPE" | grep -q "Mach-O"; then
+
+              echo
+              echo "----------------------------------------"
+              echo "$FILE"
+              echo "$TYPE"
+
+              lipo -info "$FILE" \
+                2>/dev/null \
+                || true
+
+            fi
+
+          done
+
+
+      # =========================================================
+      # 19. Fix application name in Info.plist
+      # =========================================================
+
+      - name: Update application Info.plist
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          PLIST="$APP/Contents/Info.plist"
+
+          echo "Updating Info.plist..."
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleName Gunny PC" \
+            "$PLIST" \
+            2>/dev/null \
+            || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleDisplayName Gunny PC" \
+            "$PLIST" \
+            2>/dev/null \
+            || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleExecutable Gunny PC" \
+            "$PLIST" \
+            2>/dev/null \
+            || true
+
+          echo
+          echo "===== INFO.PLIST ====="
+
+          plutil -p "$PLIST"
+
+
+      # =========================================================
+      # 20. Update helper Info.plists
+      # =========================================================
+
+      - name: Update helper bundle names
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          find "$APP/Contents/Frameworks" \
+            -type f \
+            -name "Info.plist" \
+            -print0 |
+          while IFS= read -r -d '' PLIST; do
+
+            /usr/libexec/PlistBuddy \
+              -c "Set :CFBundleDisplayName Gunny PC" \
+              "$PLIST" \
+              2>/dev/null \
+              || true
+
+          done
+
+
+      # =========================================================
+      # 21. Remove quarantine attributes
+      # =========================================================
+
+      - name: Remove quarantine attributes
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          xattr -cr "$APP" || true
+
+
+      # =========================================================
+      # 22. Ad-hoc code signing
+      # =========================================================
+
+      - name: Code sign Gunny ARM64
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          echo "Signing application..."
+
+          codesign \
+            --force \
+            --deep \
+            --sign - \
+            "$APP"
+
+          echo
+          echo "===== CODESIGN ====="
+
+          codesign \
+            --verify \
+            --deep \
+            --strict \
+            --verbose=2 \
+            "$APP"
+
+
+      # =========================================================
+      # 23. Final architecture scan
+      # =========================================================
+
+      - name: Scan final application architecture
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          echo "========================================"
+          echo "FINAL ARCHITECTURE SCAN"
+          echo "========================================"
+
+          find "$APP" \
+            -type f \
+            -print0 |
+          while IFS= read -r -d '' FILE; do
+
+            TYPE=$(file "$FILE")
+
+            if echo "$TYPE" | grep -q "Mach-O"; then
+
+              echo "$TYPE"
+
+            fi
+
+          done
+
+
+      # =========================================================
+      # 24. Check main executable
+      # =========================================================
+
+      - name: Verify final main executable
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          BIN="$APP/Contents/MacOS/Gunny PC"
+
+          echo "========================================"
+          echo "FINAL MAIN EXECUTABLE"
+          echo "========================================"
+
+          file "$BIN"
+
+          echo
+
+          lipo -info "$BIN"
+
+
+      # =========================================================
+      # 25. Check ARM64 count
+      # =========================================================
+
+      - name: Count ARM64 and Intel binaries
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          ARM64=0
+          X64=0
+
+          while IFS= read -r -d '' FILE; do
+
+            TYPE=$(file "$FILE")
+
+            if echo "$TYPE" | grep -q "Mach-O"; then
+
+              if echo "$TYPE" | grep -q "arm64"; then
+                ARM64=$((ARM64 + 1))
+              fi
+
+              if echo "$TYPE" | grep -q "x86_64"; then
+                X64=$((X64 + 1))
+              fi
+
+            fi
+
+          done < <(find "$APP" -type f -print0)
+
+          echo "ARM64 Mach-O files: $ARM64"
+          echo "x86_64 Mach-O files: $X64"
+
+          echo "$ARM64" > output/arm64_count.txt
+          echo "$X64" > output/x64_count.txt
+
+
+      # =========================================================
+      # 26. Create DMG
+      # =========================================================
+
+      - name: Create DMG
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          mkdir -p output/dmg
+
+          cp -R \
+            "$APP" \
+            output/dmg/
+
+          rm -f output/Gunny-PC-ARM64.dmg
+
+          hdiutil create \
+            -volname "Gunny PC ARM64" \
+            -srcfolder output/dmg \
+            -ov \
+            -format UDZO \
+            output/Gunny-PC-ARM64.dmg
+
+          echo
+          echo "===== DMG ====="
+
+          ls -lh output/Gunny-PC-ARM64.dmg
+
+
+      # =========================================================
+      # 27. Create build report
+      # =========================================================
+
+      - name: Create build report
+        run: |
+          set -e
+
+          APP=$(cat build/gunny_app_path.txt)
+
+          REPORT="output/build-report.txt"
+
+          {
+
+            echo "========================================"
+            echo "GUNNY PC ARM64 BUILD REPORT"
+            echo "========================================"
+
+            echo
+            echo "Electron target:"
+            echo "$ELECTRON_VERSION"
+
+            echo
+            echo "Runner:"
+            uname -a
+
+            echo
+            echo "Runner architecture:"
+            uname -m
+
+            echo
+            echo "Main executable:"
+            file "$APP/Contents/MacOS/Gunny PC"
+
+            echo
+            echo "Main executable lipo:"
+            lipo -info "$APP/Contents/MacOS/Gunny PC" \
+              2>&1 \
+              || true
+
+            echo
+            echo "ARM64 Mach-O count:"
+            cat output/arm64_count.txt
+
+            echo
+            echo "x86_64 Mach-O count:"
+            cat output/x64_count.txt
+
+            echo
+            echo "Pepper Flash:"
+
+            FLASH="$APP/Contents/Resources/plugins/PepperFlashPlayer.plugin"
+
+            if [ -d "$FLASH" ]; then
+
+              find "$FLASH" \
+                -type f \
+                -print0 |
+              while IFS= read -r -d '' FILE; do
+
+                TYPE=$(file "$FILE")
+
+                if echo "$TYPE" | grep -q "Mach-O"; then
+
+                  echo "$TYPE"
+
+                fi
+
+              done
+
+            else
+
+              echo "Not found."
+
+            fi
+
+          } > "$REPORT"
+
+          cat "$REPORT"
+
+
+      # =========================================================
+      # 28. Upload ARM64 application
+      # =========================================================
+
+      - name: Upload Gunny PC ARM64 app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-PC-ARM64-App
+          path: build/Gunny PC ARM64.app/
+          retention-days: 7
+
+
+      # =========================================================
+      # 29. Upload DMG
+      # =========================================================
+
+      - name: Upload Gunny PC ARM64 DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-PC-ARM64-DMG
+          path: output/Gunny-PC-ARM64.dmg
+          retention-days: 7
+
+
+      # =========================================================
+      # 30. Upload report
+      # =========================================================
+
+      - name: Upload build report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-PC-ARM64-Report
+          path: output/build-report.txt
+          retention-days: 7
