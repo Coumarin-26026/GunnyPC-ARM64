@@ -1,0 +1,113 @@
+name: Download and Analyze Gunny
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install gdown
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U gdown
+
+      - name: Create directories
+        run: |
+          mkdir -p input
+          mkdir -p analysis
+
+      - name: Download Gunny from Google Drive
+        run: |
+          gdown \
+            --folder \
+            "https://drive.google.com/drive/folders/17cF-Hb-JUIVcFaeaL-QkGdsku-rnuxby?usp=drive_link" \
+            -O input
+
+      - name: Show downloaded files
+        run: |
+          echo "===== FILES ====="
+          find input -type f -print
+
+      - name: Find Gunny application
+        run: |
+          echo "===== APP FILES ====="
+          find input -name "*.app" -print
+
+      - name: Inspect architectures
+        run: |
+          echo "===== MACH-O ARCHITECTURES ====="
+
+          find input -type f -perm -111 -print0 | while IFS= read -r -d '' file
+          do
+            echo "--------------------------------"
+            echo "$file"
+            file "$file" || true
+          done
+
+      - name: Inspect macOS app structure
+        run: |
+          find input -name "*.app" -type d | while read app
+          do
+            echo "================================"
+            echo "APP: $app"
+            echo "================================"
+
+            find "$app/Contents" -maxdepth 3 -type f | sort
+          done
+
+      - name: Check for Electron
+        run: |
+          echo "===== ELECTRON CHECK ====="
+
+          find input \
+            \( -name "Electron Framework.framework" \
+            -o -name "app.asar" \
+            -o -name "electron" \) \
+            -print
+
+      - name: Check package.json
+        run: |
+          echo "===== PACKAGE.JSON ====="
+
+          find input -name "package.json" -type f -print
+
+          find input -name "package.json" -type f \
+            -exec sh -c 'echo "----- $1 -----"; cat "$1"' _ {} \;
+
+      - name: Save analysis
+        run: |
+          {
+            echo "=== ARCHITECTURE ==="
+            find input -type f -perm -111 -exec file {} \;
+
+            echo
+            echo "=== APP STRUCTURE ==="
+            find input -name "*.app" -type d -exec find {} -maxdepth 3 -type f \;
+
+            echo
+            echo "=== ELECTRON ==="
+            find input \
+              \( -name "Electron Framework.framework" \
+              -o -name "app.asar" \
+              -o -name "electron" \) \
+              -print
+
+          } > analysis/report.txt
+
+          cat analysis/report.txt
+
+      - name: Upload analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: gunny-analysis
+          path: analysis/
