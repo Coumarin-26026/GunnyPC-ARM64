@@ -356,143 +356,274 @@ jobs:
             "$SRC/" \
             "$DST/"
 
-      - name: Patch BrowserWindow
+            - name: Patch BrowserWindow for Ruffle
         shell: bash
         run: |
           set -euo pipefail
 
           MAIN="$(cat build/main-path.txt)"
+
           export MAIN
+
+          echo "=========================================="
+          echo "ANALYZING ELECTRON WINDOW"
+          echo "=========================================="
+
+          echo
+          echo "MAIN:"
+          echo "$MAIN"
+
+          echo
+          echo "BrowserWindow references:"
+
+          grep -niE \
+            "BrowserWindow|webPreferences|loadURL|loadFile|webContents" \
+            "$MAIN" \
+            | head -300 \
+            || true
 
           python3 <<'PY'
           import os
           import re
           from pathlib import Path
           
-          p = Path(os.environ["MAIN"])
-          s = p.read_text(encoding="utf-8-sig")
+          main = Path(os.environ["MAIN"])
           
-          def matching_brace(text, start):
-              depth = 0
-              quote = None
-              escape = False
-              i = start
+          source = main.read_text(
+              encoding="utf-8-sig"
+          )
           
-              while i < len(text):
-                  c = text[i]
+          print()
+          print("main.js size:", len(source), "bytes")
           
-                  if quote:
-                      if escape:
-                          escape = False
-                      elif c == "\\":
-                          escape = True
-                      elif c == quote:
-                          quote = None
-                      i += 1
-                      continue
           
-                  if c in ("'", '"', "`"):
-                      quote = c
-                  elif c == "{":
-                      depth += 1
-                  elif c == "}":
-                      depth -= 1
-                      if depth == 0:
-                          return i
+          # ==========================================================
+          # 1. EXISTING webPreferences
+          # ==========================================================
           
-                  i += 1
+          if re.search(
+              r"\bwebPreferences\s*:",
+              source
+          ):
           
-              return -1
-          
-          matches = []
-          pos = 0
-          
-          while True:
-              idx = s.find("webPreferences", pos)
-          
-              if idx == -1:
-                  break
-          
-              brace = s.find("{", idx)
-          
-              if brace == -1:
-                  break
-          
-              end = matching_brace(s, brace)
-          
-              if end == -1:
-                  break
-          
-              matches.append((brace, end))
-              pos = end + 1
-          
-          if not matches:
-              raise SystemExit(
-                  "ERROR: webPreferences object not found."
+              print(
+                  "Found existing webPreferences."
               )
           
-          for brace, end in reversed(matches):
-              body = s[brace + 1:end]
-          
-              body = re.sub(
-                  r"(?m)^\s*preload\s*:[^\n]+,?\s*$",
+              # Remove old preload.
+              source = re.sub(
+                  r"(?m)^[ \t]*preload\s*:[^\n]*,?[ \t]*\n?",
                   "",
-                  body
+                  source
               )
           
-              body = re.sub(
-                  r"(?m)^\s*plugins\s*:[^\n]+,?\s*$",
+              # Remove old plugins.
+              source = re.sub(
+                  r"(?m)^[ \t]*plugins\s*:[^\n]*,?[ \t]*\n?",
                   "",
-                  body
+                  source
               )
           
-              body = re.sub(
-                  r"(?m)^\s*contextIsolation\s*:[^\n]+,?\s*$",
+              # Remove old contextIsolation.
+              source = re.sub(
+                  r"(?m)^[ \t]*contextIsolation\s*:[^\n]*,?[ \t]*\n?",
                   "",
-                  body
+                  source
               )
           
-              body = re.sub(
-                  r"(?m)^\s*sandbox\s*:[^\n]+,?\s*$",
+              # Remove old sandbox.
+              source = re.sub(
+                  r"(?m)^[ \t]*sandbox\s*:[^\n]*,?[ \t]*\n?",
                   "",
-                  body
+                  source
               )
           
-              injection = """
+              replacement = """webPreferences: {
                   contextIsolation: false,
                   sandbox: false,
                   plugins: true,
                   preload: require('path').join(
                       process.resourcesPath,
                       'preload-ruffle.js'
-                  ),
-          """
+                  )
+              }"""
           
-              body = injection + body
-          
-              s = (
-                  s[:brace + 1]
-                  + body
-                  + s[end:]
+              source, count = re.subn(
+                  r"webPreferences\s*:\s*\{[^{}]*\}",
+                  replacement,
+                  source,
+                  count=1
               )
           
-          p.write_text(s, encoding="utf-8")
+              if count != 1:
+                  raise SystemExit(
+                      "ERROR: existing webPreferences could not be patched."
+                  )
           
+              print(
+                  "Existing webPreferences patched."
+              )
+          
+          
+          # ==========================================================
+          # 2. NO webPreferences
+          #    FIND BrowserWindow CONSTRUCTOR
+          # ==========================================================
+          
+          else:
+          
+              print(
+                  "No webPreferences found."
+              )
+          
+              patterns = [
+                  r"new\s+BrowserWindow\s*\(\s*\{",
+                  r"new\s+electron\.BrowserWindow\s*\(\s*\{",
+                  r"new\s+Electron\.BrowserWindow\s*\(\s*\{",
+                  r"new\s+[\w$]+\.BrowserWindow\s*\(\s*\{",
+              ]
+          
+              match = None
+          
+              for pattern in patterns:
+          
+                  match = re.search(
+                      pattern,
+                      source
+                  )
+          
+                  if match:
+                      print(
+                          "BrowserWindow constructor found:",
+                          pattern
+                      )
+                      break
+          
+              if match is None:
+          
+                  print()
+                  print(
+                      "ERROR: BrowserWindow constructor was not found."
+                  )
+          
+                  print()
+                  print(
+                      "All BrowserWindow-related lines:"
+                  )
+          
+                  for number, line in enumerate(
+                      source.splitlines(),
+                      1
+                  ):
+          
+                      if re.search(
+                          r"BrowserWindow|webContents|loadURL|loadFile",
+                          line,
+                          re.IGNORECASE
+                      ):
+          
+                          print(
+                              f"{number}: {line[:1000]}"
+                          )
+          
+                  raise SystemExit(
+                      "Gunny uses a different Electron window structure."
+                  )
+          
+              # ------------------------------------------------------
+              # Find opening { of BrowserWindow options.
+              # ------------------------------------------------------
+          
+              brace = source.find(
+                  "{",
+                  match.start(),
+                  match.end()
+              )
+          
+              if brace == -1:
+                  raise SystemExit(
+                      "ERROR: BrowserWindow options object not found."
+                  )
+          
+              # ------------------------------------------------------
+              # Insert webPreferences.
+              # ------------------------------------------------------
+          
+              injection = """{
+                  webPreferences: {
+                      contextIsolation: false,
+                      sandbox: false,
+                      plugins: true,
+                      preload: require('path').join(
+                          process.resourcesPath,
+                          'preload-ruffle.js'
+                      )
+                  },
+          """
+          
+              source = (
+                  source[:brace]
+                  + injection
+                  + source[brace + 1:]
+              )
+          
+              print(
+                  "Created webPreferences."
+              )
+          
+          
+          # ==========================================================
+          # 3. WRITE
+          # ==========================================================
+          
+          main.write_text(
+              source,
+              encoding="utf-8"
+          )
+          
+          print()
           print(
-              "Patched:",
-              len(matches),
-              "webPreferences object(s)"
+              "main.js patched successfully."
           )
           PY
-
-          node --check "$MAIN"
-
-          echo
-          echo "BrowserWindow configuration:"
-          grep -niE \
-            "webPreferences|contextIsolation|sandbox|plugins|preload" \
-            "$MAIN" \
-            | head -300
+          
+                    echo
+                    echo "=========================================="
+                    echo "JAVASCRIPT CHECK"
+                    echo "=========================================="
+          
+                    node \
+                      --check \
+                      "$MAIN"
+          
+                    echo
+                    echo "JavaScript syntax: OK"
+          
+                    echo
+                    echo "=========================================="
+                    echo "RUFFLE SETTINGS"
+                    echo "=========================================="
+          
+                    grep -niE \
+                      "BrowserWindow|webPreferences|contextIsolation|sandbox|plugins|preload-ruffle" \
+                      "$MAIN" \
+                      | head -300 \
+                      || true
+          
+                    echo
+                    echo "=========================================="
+                    echo "CHECK PRELOAD"
+                    echo "=========================================="
+          
+                    if grep -q \
+                      "preload-ruffle.js" \
+                      "$MAIN"
+                    then
+                      echo "preload-ruffle.js: FOUND"
+                    else
+                      echo "ERROR: Ruffle preload was not inserted."
+                      exit 1
+                    fi
 
       - name: Install Ruffle
         shell: bash
