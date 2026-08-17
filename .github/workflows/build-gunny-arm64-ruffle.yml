@@ -8,30 +8,24 @@ permissions:
 
 env:
   APP_NAME: "Gunny PC"
-
-  # Gunny Intel source
-  GUNNY_URL: "https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b"
-
-  # Electron version requested for the build
   ELECTRON_VERSION: "43.2.0"
-
-  # Stable Ruffle release
   RUFFLE_VERSION: "0.4.1"
+
+  GUNNY_URL: "https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b"
 
 
 jobs:
 
   build:
 
-    name: Gunny ARM64
+    name: Gunny PC ARM64 + Ruffle
 
-    # GitHub macOS runner
     runs-on: macos-14
 
     steps:
 
       # ==========================================================
-      # CHECKOUT
+      # 01. CHECKOUT
       # ==========================================================
 
       - name: Checkout
@@ -39,7 +33,29 @@ jobs:
 
 
       # ==========================================================
-      # BASIC TOOLS
+      # 02. SYSTEM
+      # ==========================================================
+
+      - name: System information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "SYSTEM"
+          echo "=========================================="
+
+          sw_vers
+
+          echo
+          uname -a
+
+          echo
+          uname -m
+
+
+      # ==========================================================
+      # 03. INSTALL TOOLS
       # ==========================================================
 
       - name: Install tools
@@ -47,36 +63,52 @@ jobs:
         run: |
           set -euo pipefail
 
-          brew update
-
           brew install \
-            jq \
-            node \
-            wget \
-            unzip
+            p7zip
 
+          npm install \
+            --global \
+            @electron/asar
 
-      # ==========================================================
-      # NODE
-      # ==========================================================
-
-      - name: Show Node
-        shell: bash
-        run: |
+          echo
+          echo "Node:"
           node --version
+
+          echo
+          echo "npm:"
           npm --version
 
+          echo
+          echo "asar:"
+          asar --version
+
 
       # ==========================================================
-      # DOWNLOAD GUNNY INTEL
+      # 04. PREPARE
+      # ==========================================================
+
+      - name: Prepare directories
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf \
+            build \
+            release
+
+          mkdir -p \
+            build \
+            release
+
+
+      # ==========================================================
+      # 05. DOWNLOAD GUNNY INTEL
       # ==========================================================
 
       - name: Download Gunny Intel
         shell: bash
         run: |
           set -euo pipefail
-
-          mkdir -p build
 
           echo "=========================================="
           echo "DOWNLOAD GUNNY"
@@ -88,22 +120,21 @@ jobs:
             --retry 10 \
             --retry-delay 5 \
             --connect-timeout 30 \
-            --max-time 600 \
+            --max-time 1800 \
             -A "Mozilla/5.0" \
             "$GUNNY_URL" \
             -o build/gunny.zip
 
           echo
-          echo "Downloaded:"
-          ls -lh build/gunny.zip
+          ls -lh \
+            build/gunny.zip
 
-          echo
-          echo "File type:"
-          file build/gunny.zip
+          file \
+            build/gunny.zip
 
 
       # ==========================================================
-      # EXTRACT GUNNY
+      # 06. EXTRACT GUNNY
       # ==========================================================
 
       - name: Extract Gunny
@@ -111,27 +142,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf build/gunny-source
+          rm -rf \
+            build/gunny
 
-          mkdir -p build/gunny-source
+          mkdir -p \
+            build/gunny
 
           unzip \
             -q \
+            -o \
             build/gunny.zip \
-            -d build/gunny-source
+            -d build/gunny
+
+          rm -rf \
+            build/gunny/__MACOSX
 
           echo
-          echo "Applications found:"
+          echo "Applications:"
 
-          find build/gunny-source \
-            -maxdepth 8 \
+          find build/gunny \
             -type d \
             -name "*.app" \
             -print
 
 
       # ==========================================================
-      # LOCATE GUNNY APP
+      # 07. LOCATE ORIGINAL APP
       # ==========================================================
 
       - name: Locate Gunny app
@@ -140,72 +176,65 @@ jobs:
           set -euo pipefail
 
           APP="$(
-            find build/gunny-source \
+            find build/gunny \
               -type d \
               -name "*.app" \
-              ! -path "*/__MACOSX/*" \
               -print \
-              | head -1
+              | head -n 1
           )"
 
           if [ -z "$APP" ]; then
-            echo "ERROR: Gunny .app not found."
+            echo "ERROR: .app not found."
             exit 1
           fi
 
-          echo "$APP" \
-            > build/gunny-app-path.txt
+          printf '%s\n' "$APP" \
+            > build/original-app.txt
 
           echo
-          echo "Gunny app:"
-          echo "$APP"
+          echo "Original app:"
+          cat build/original-app.txt
 
 
       # ==========================================================
-      # INSPECT ORIGINAL ARCHITECTURE
+      # 08. INSPECT ORIGINAL
       # ==========================================================
 
-      - name: Inspect original app
+      - name: Inspect original Gunny
         shell: bash
         run: |
           set -euo pipefail
 
           APP="$(
-            cat build/gunny-app-path.txt
+            cat build/original-app.txt
           )"
 
           echo "=========================================="
-          echo "ORIGINAL ARCHITECTURE"
+          echo "ORIGINAL APP"
           echo "=========================================="
 
-          find "$APP" \
-            -type f \
-            -perm -111 \
-            -print0 \
-          | while IFS= read -r -d '' f
-            do
-              file "$f" || true
-            done
+          echo
+          echo "Main executable:"
+
+          file \
+            "$APP/Contents/MacOS/Gunny PC" \
+            || true
+
+          echo
+          echo "Pepper Flash:"
+
+          find "$APP/Contents/Resources" \
+            \( \
+              -iname "*PepperFlash*" \
+              -o \
+              -iname "*pepflash*" \
+            \) \
+            -print \
+            || true
 
 
       # ==========================================================
-      # INSTALL ASAR
-      # ==========================================================
-
-      - name: Install asar
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          npm install \
-            --global \
-            @electron/asar
-
-          asar --version
-
-
-      # ==========================================================
-      # EXTRACT APP.ASAR
+      # 09. EXTRACT ASAR
       # ==========================================================
 
       - name: Extract app.asar
@@ -214,29 +243,29 @@ jobs:
           set -euo pipefail
 
           APP="$(
-            cat build/gunny-app-path.txt
+            cat build/original-app.txt
           )"
 
           ASAR="$APP/Contents/Resources/app.asar"
 
           if [ ! -f "$ASAR" ]; then
-            echo "ERROR: app.asar not found:"
-            echo "$ASAR"
+            echo "ERROR: app.asar not found."
             exit 1
           fi
 
-          rm -rf build/app-source
+          rm -rf \
+            build/source
 
           asar extract \
             "$ASAR" \
-            build/app-source
+            build/source
 
           echo
           echo "app.asar extracted."
 
 
       # ==========================================================
-      # FIND MAIN.JS
+      # 10. LOCATE MAIN.JS
       # ==========================================================
 
       - name: Locate main.js
@@ -245,38 +274,35 @@ jobs:
           set -euo pipefail
 
           MAIN="$(
-            find build/app-source \
+            find build/source \
               -type f \
               -name "main.js" \
               -print \
-              | head -1
+              | head -n 1
           )"
 
           if [ -z "$MAIN" ]; then
             echo "ERROR: main.js not found."
-
-            find build/app-source \
-              -maxdepth 4 \
-              -type f \
-              | sort \
-              | head -300
-
             exit 1
           fi
 
-          echo "$MAIN" \
+          printf '%s\n' "$MAIN" \
             > build/main-path.txt
+
+          cp \
+            "$MAIN" \
+            build/main.original.js
 
           echo
           echo "main.js:"
-          echo "$MAIN"
+          cat build/main-path.txt
 
 
       # ==========================================================
-      # BACKUP MAIN.JS
+      # 11. ANALYZE MAIN.JS
       # ==========================================================
 
-      - name: Backup main.js
+      - name: Analyze Flash configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -285,23 +311,34 @@ jobs:
             cat build/main-path.txt
           )"
 
-          cp \
+          echo "=========================================="
+          echo "FLASH ANALYSIS"
+          echo "=========================================="
+
+          echo
+          echo "Flash / PPAPI references:"
+
+          grep -niE \
+            "ppapi|pepperflash|pepflash|flash_not_found|flashPath|flash" \
             "$MAIN" \
-            build/main.original.js
+            | head -300 \
+            || true
+
+          echo
+          echo "BrowserWindow / preload references:"
+
+          grep -niE \
+            "BrowserWindow|webPreferences|preload" \
+            "$MAIN" \
+            | head -300 \
+            || true
 
 
       # ==========================================================
-      # PATCH MAIN.JS
+      # 12. PATCH MAIN.JS
       #
-      # IMPORTANT:
-      # We DO NOT search for:
-      #
-      #   // ── Flash path
-      #
-      # because the original source does not necessarily contain
-      # that exact marker.
-      #
-      # Instead we remove actual PPAPI references safely.
+      # NO hard-coded Unicode marker.
+      # NO app.whenReady().
       # ==========================================================
 
       - name: Patch main.js
@@ -320,22 +357,23 @@ jobs:
           import os
           import re
 
-          main = Path(os.environ["MAIN"])
+          p = Path(os.environ["MAIN"])
 
-          text = main.read_text(
+          s = p.read_text(
               encoding="utf-8-sig"
           )
 
-          original = text
+          original = s
 
 
           # ------------------------------------------------------
-          # Remove ppapi-flash-path calls
+          # Remove ppapi-flash-path appendSwitch()
           # ------------------------------------------------------
 
-          text = re.sub(
+          s = re.sub(
               r"""
-              app\.commandLine\.appendSwitch
+              [A-Za-z0-9_$.\[\]]+
+              \.appendSwitch
               \s*\(
               \s*["']ppapi-flash-path["']
               \s*,[\s\S]*?
@@ -343,18 +381,19 @@ jobs:
               \s*;
               """,
               "",
-              text,
+              s,
               flags=re.IGNORECASE | re.VERBOSE
           )
 
 
           # ------------------------------------------------------
-          # Remove ppapi-flash-version calls
+          # Remove ppapi-flash-version appendSwitch()
           # ------------------------------------------------------
 
-          text = re.sub(
+          s = re.sub(
               r"""
-              app\.commandLine\.appendSwitch
+              [A-Za-z0-9_$.\[\]]+
+              \.appendSwitch
               \s*\(
               \s*["']ppapi-flash-version["']
               \s*,[\s\S]*?
@@ -362,118 +401,97 @@ jobs:
               \s*;
               """,
               "",
-              text,
+              s,
               flags=re.IGNORECASE | re.VERBOSE
           )
 
 
           # ------------------------------------------------------
-          # Remove standalone lines containing PPAPI switches
+          # Remove lines containing PPAPI switch names.
           # ------------------------------------------------------
 
-          text = re.sub(
+          s = re.sub(
               r"""
               ^[^\n]*
-              (?:
-                ppapi-flash-path
-                |
-                ppapi-flash-version
-              )
+              ppapi-flash-path
               [^\n]*$
               """,
               "",
-              text,
-              flags=re.IGNORECASE |
-                   re.MULTILINE |
-                   re.VERBOSE
+              s,
+              flags=re.IGNORECASE | re.MULTILINE | re.VERBOSE
+          )
+
+          s = re.sub(
+              r"""
+              ^[^\n]*
+              ppapi-flash-version
+              [^\n]*$
+              """,
+              "",
+              s,
+              flags=re.IGNORECASE | re.MULTILINE | re.VERBOSE
           )
 
 
           # ------------------------------------------------------
-          # Remove Flash deployment call
+          # Disable old Flash deployment call.
           # ------------------------------------------------------
 
-          text = re.sub(
+          s = re.sub(
               r"""
               ^[^\n]*
               _deployFlashMmsCfg
-              \s*\([^;]*\)
-              \s*;?
               [^\n]*$
               """,
               "",
-              text,
+              s,
               flags=re.MULTILINE | re.VERBOSE
           )
 
 
           # ------------------------------------------------------
-          # Remove direct PepperFlash references
+          # Remove old Flash-not-found telemetry.
           # ------------------------------------------------------
 
-          text = re.sub(
-              r"""
-              ^[^\n]*
-              (?:
-                PepperFlashPlayer\.plugin
-                |
-                pepflashplayer
-              )
-              [^\n]*$
-              """,
-              "",
-              text,
-              flags=re.IGNORECASE |
-                   re.MULTILINE |
-                   re.VERBOSE
-          )
-
-
-          # ------------------------------------------------------
-          # Remove flash_not_found tracking
-          # ------------------------------------------------------
-
-          text = re.sub(
+          s = re.sub(
               r"""
               ^[^\n]*
               flash_not_found
               [^\n]*$
               """,
               "",
-              text,
-              flags=re.IGNORECASE |
-                   re.MULTILINE |
-                   re.VERBOSE
+              s,
+              flags=re.IGNORECASE | re.MULTILINE | re.VERBOSE
           )
 
 
           # ------------------------------------------------------
-          # Keep Electron plugins enabled
+          # plugins must remain enabled.
           # ------------------------------------------------------
 
-          text = re.sub(
+          s = re.sub(
               r"""
               (plugins\s*:\s*)false
               """,
               r"\1true",
-              text,
+              s,
               flags=re.IGNORECASE | re.VERBOSE
           )
 
 
           # ------------------------------------------------------
-          # Cleanup
+          # Cleanup.
           # ------------------------------------------------------
 
-          text = re.sub(
+          s = re.sub(
               r"\n{4,}",
               "\n\n\n",
-              text
+              s
           )
 
 
-          main.write_text(
-              text,
+          p.write_text(
+              s,
               encoding="utf-8"
           )
 
@@ -483,82 +501,172 @@ jobs:
           )
 
           print(
-              "Changed:",
-              text != original
+              "changed:",
+              s != original
           )
 
           PY
 
 
-      # ==========================================================
-      # CHECK MAIN.JS
-      # ==========================================================
-
-      - name: Validate main.js
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          MAIN="$(
-            cat build/main-path.txt
-          )"
-
-          echo "=========================================="
-          echo "JAVASCRIPT CHECK"
-          echo "=========================================="
+          echo
+          echo "JavaScript syntax:"
 
           node \
             --check \
             "$MAIN"
 
-          echo
-          echo "main.js syntax OK."
 
           echo
-          echo "Remaining Flash references:"
-
-          grep -niE \
-            "flash|pepper|ppapi" \
-            "$MAIN" \
-            | head -200 \
-            || true
-
-
-          echo
-          echo "PPAPI switches:"
+          echo "PPAPI check:"
 
           if grep -niE \
             "ppapi-flash-path|ppapi-flash-version" \
             "$MAIN"
           then
-            echo "ERROR: PPAPI switches remain."
+            echo "ERROR: PPAPI remains."
             exit 1
-          else
-            echo "NONE"
           fi
+
+          echo "PPAPI removed."
 
 
       # ==========================================================
-      # DOWNLOAD RUFFLE SELFHOSTED
+      # 13. DOWNLOAD RUFFLE
       #
-      # Do NOT call the GitHub API here.
+      # IMPORTANT:
+      # Use gh release download with a wildcard.
       #
-      # This avoids the 403/API parsing problem from the previous
-      # workflow.
+      # We DO NOT guess the actual asset filename.
       # ==========================================================
 
       - name: Download Ruffle self-hosted
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          mkdir -p build/ruffle
+          echo "=========================================="
+          echo "RUFFLE ${RUFFLE_VERSION}"
+          echo "=========================================="
 
-          RUFFLE_ZIP="build/ruffle-selfhosted.zip"
+          rm -rf \
+            build/ruffle
 
-          URL="https://github.com/ruffle-rs/ruffle/releases/download/v${RUFFLE_VERSION}/ruffle-nightly-${RUFFLE_VERSION}-web-selfhosted.zip"
+          mkdir -p \
+            build/ruffle
 
-          echo "Ruffle:"
+          cd build/ruffle
+
+          gh release download \
+            "v${RUFFLE_VERSION}" \
+            --repo ruffle-rs/ruffle \
+            --pattern "*-web-selfhosted.zip" \
+            --clobber
+
+          ZIP="$(
+            find . \
+              -maxdepth 1 \
+              -type f \
+              -name "*-web-selfhosted.zip" \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: Ruffle self-hosted ZIP not found."
+            ls -la
+            exit 1
+          fi
+
+          echo
+          echo "Ruffle archive:"
+          echo "$ZIP"
+
+          unzip \
+            -q \
+            -o \
+            "$ZIP" \
+            -d extracted
+
+          echo
+          echo "Extracted Ruffle files:"
+
+          find extracted \
+            -maxdepth 3 \
+            -type f \
+            | sort
+
+
+      # ==========================================================
+      # 14. LOCATE RUFFLE ROOT
+      # ==========================================================
+
+      - name: Validate Ruffle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="$(
+            find build/ruffle/extracted \
+              -type f \
+              -name "ruffle.js" \
+              -print \
+              | head -n 1 \
+              | xargs -I{} dirname "{}"
+          )"
+
+          if [ -z "$ROOT" ]; then
+            echo "ERROR: ruffle.js not found."
+            exit 1
+          fi
+
+          echo "$ROOT" \
+            > build/ruffle-root.txt
+
+          echo
+          echo "Ruffle root:"
+          cat build/ruffle-root.txt
+
+          WASM="$(
+            find "$ROOT" \
+              -type f \
+              -name "*.wasm" \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$WASM" ]; then
+            echo "ERROR: Ruffle WASM not found."
+            exit 1
+          fi
+
+          echo
+          echo "Ruffle JS:"
+          ls -lh \
+            "$ROOT/ruffle.js"
+
+          echo
+          echo "Ruffle WASM:"
+          ls -lh \
+            "$WASM"
+
+
+      # ==========================================================
+      # 15. DOWNLOAD ELECTRON ARM64
+      # ==========================================================
+
+      - name: Download Electron ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="https://github.com/electron/electron/releases/download/v${ELECTRON_VERSION}/electron-v${ELECTRON_VERSION}-darwin-arm64.zip"
+
+          echo "=========================================="
+          echo "ELECTRON ARM64"
+          echo "=========================================="
+
           echo "$URL"
 
           curl \
@@ -567,147 +675,214 @@ jobs:
             --retry 10 \
             --retry-delay 5 \
             --connect-timeout 30 \
-            --max-time 600 \
+            --max-time 1800 \
             -A "Mozilla/5.0" \
             "$URL" \
-            -o "$RUFFLE_ZIP"
+            -o build/electron-arm64.zip
 
           echo
-          file "$RUFFLE_ZIP"
-
-          ls -lh "$RUFFLE_ZIP"
+          ls -lh \
+            build/electron-arm64.zip
 
 
       # ==========================================================
-      # RUFFLE FALLBACK:
-      #
-      # If release asset naming changes, build selfhosted from
-      # the official Ruffle source instead.
+      # 16. EXTRACT ELECTRON
       # ==========================================================
 
-      - name: Verify Ruffle archive
+      - name: Extract Electron ARM64
         shell: bash
         run: |
           set -euo pipefail
 
-          if ! unzip -t \
-            build/ruffle-selfhosted.zip \
-            >/dev/null
-          then
+          rm -rf \
+            build/electron
 
-            echo "Ruffle release asset could not be opened."
-
-            rm -f \
-              build/ruffle-selfhosted.zip
-
-            echo "Downloading Ruffle source..."
-
-            git clone \
-              --depth 1 \
-              --branch "v${RUFFLE_VERSION}" \
-              https://github.com/ruffle-rs/ruffle.git \
-              build/ruffle-source
-
-            cd build/ruffle-source/web
-
-            npm install
-
-            npm run build
-
-            cd ../..
-
-            cp \
-              -R \
-              build/ruffle-source/web/packages/selfhosted/dist/. \
-              build/ruffle/
-
-            exit 0
-          fi
-
-          rm -rf build/ruffle
-
-          mkdir -p build/ruffle
+          mkdir -p \
+            build/electron
 
           unzip \
             -q \
-            build/ruffle-selfhosted.zip \
-            -d build/ruffle
+            -o \
+            build/electron-arm64.zip \
+            -d build/electron
 
-
-      # ==========================================================
-      # FIND ruffle.js
-      # ==========================================================
-
-      - name: Validate Ruffle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          RUFFLE_JS="$(
-            find build/ruffle \
-              -type f \
-              -name "ruffle.js" \
+          ELECTRON_APP="$(
+            find build/electron \
+              -type d \
+              -name "Electron.app" \
               -print \
-              | head -1
+              | head -n 1
           )"
 
-          if [ -z "$RUFFLE_JS" ]; then
-            echo "ERROR: ruffle.js not found."
-
-            find build/ruffle \
-              -maxdepth 4 \
-              -type f \
-              | sort \
-              | head -300
-
+          if [ -z "$ELECTRON_APP" ]; then
+            echo "ERROR: Electron.app not found."
             exit 1
           fi
 
-          echo "$RUFFLE_JS" \
-            > build/ruffle-js-path.txt
+          printf '%s\n' "$ELECTRON_APP" \
+            > build/electron-app.txt
+
+          BIN="$ELECTRON_APP/Contents/MacOS/Electron"
 
           echo
-          echo "Ruffle OK:"
-          echo "$RUFFLE_JS"
+          file "$BIN"
+
+          echo
+          lipo -info "$BIN"
+
+          if ! file "$BIN" | grep -q "arm64"; then
+            echo "ERROR: Electron is not ARM64."
+            exit 1
+          fi
 
 
       # ==========================================================
-      # COPY RUFFLE INTO APP
+      # 17. CREATE NEW ARM64 APP FROM ELECTRON
+      #
+      # This is safer than mixing random x64/arm64 Framework files.
       # ==========================================================
 
-      - name: Install Ruffle into app
+      - name: Create ARM64 app container
         shell: bash
         run: |
           set -euo pipefail
 
-          APP="$(
-            cat build/gunny-app-path.txt
+          ELECTRON_APP="$(
+            cat build/electron-app.txt
+          )"
+
+          rm -rf \
+            "build/Gunny PC ARM64.app"
+
+          cp -R \
+            "$ELECTRON_APP" \
+            "build/Gunny PC ARM64.app"
+
+          echo
+          echo "Created:"
+          ls -ld \
+            "build/Gunny PC ARM64.app"
+
+
+      # ==========================================================
+      # 18. COPY GUNNY RESOURCES
+      # ==========================================================
+
+      - name: Copy Gunny Resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ORIGINAL="$(
+            cat build/original-app.txt
+          )"
+
+          SRC="$ORIGINAL/Contents/Resources"
+
+          DST="build/Gunny PC ARM64.app/Contents/Resources"
+
+          echo "Copying Gunny Resources..."
+
+          rsync \
+            -a \
+            --exclude="app.asar" \
+            --exclude="plugins" \
+            "$SRC/" \
+            "$DST/"
+
+          echo
+          echo "Gunny resources copied."
+
+
+      # ==========================================================
+      # 19. INSTALL PATCHED ASAR
+      # ==========================================================
+
+      - name: Install patched app.asar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DST="build/Gunny PC ARM64.app/Contents/Resources"
+
+          rm -f \
+            "$DST/app.asar"
+
+          asar pack \
+            build/source \
+            "$DST/app.asar"
+
+          echo
+          ls -lh \
+            "$DST/app.asar"
+
+
+      # ==========================================================
+      # 20. INSTALL RUFFLE
+      # ==========================================================
+
+      - name: Install Ruffle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/Gunny PC ARM64.app"
+
+          ROOT="$(
+            cat build/ruffle-root.txt
           )"
 
           DEST="$APP/Contents/Resources/ruffle"
 
-          rm -rf "$DEST"
+          rm -rf \
+            "$DEST"
 
-          mkdir -p "$DEST"
+          mkdir -p \
+            "$DEST"
 
-          cp \
-            -R \
-            build/ruffle/. \
+          cp -R \
+            "$ROOT"/. \
             "$DEST/"
 
+          test -f \
+            "$DEST/ruffle.js"
+
           echo
-          echo "Ruffle installed:"
-          find "$DEST" \
-            -maxdepth 2 \
-            -type f \
-            | sort \
-            | head -100
+          echo "Ruffle installed."
 
 
       # ==========================================================
-      # CREATE RUFFLE PRELOAD
+      # 21. BACKUP GUNNY PRELOAD
+      # ==========================================================
+
+      - name: Backup original preload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/Gunny PC ARM64.app"
+
+          RES="$APP/Contents/Resources"
+
+          if [ ! -f \
+            "$RES/preload.js"
+          ]; then
+
+            echo "WARNING: preload.js not found."
+
+          else
+
+            cp \
+              "$RES/preload.js" \
+              "$RES/preload-gunny-original.js"
+
+          fi
+
+
+      # ==========================================================
+      # 22. CREATE RUFFLE PRELOAD
       #
-      # This injects ruffle.js into every Gunny page.
+      # Ruffle is loaded into the page's main world.
       # ==========================================================
 
       - name: Create Ruffle preload
@@ -715,35 +890,50 @@ jobs:
         run: |
           set -euo pipefail
 
-          APP_SOURCE="build/app-source"
+          APP="build/Gunny PC ARM64.app"
 
-          cat > "$APP_SOURCE/ruffle-preload.js" <<'JS'
-          (() => {
+          RES="$APP/Contents/Resources"
+
+          cat > \
+            "$RES/preload-ruffle.js" \
+            <<'EOF'
+          'use strict';
+
+          const fs = require('fs');
+          const path = require('path');
+          const { webFrame } = require('electron');
+          const { pathToFileURL } = require('url');
+
+          const resourcesPath =
+            process.resourcesPath;
+
+          const ruffleRoot =
+            path.join(
+              resourcesPath,
+              'ruffle'
+            );
+
+          const ruffleJS =
+            path.join(
+              ruffleRoot,
+              'ruffle.js'
+            );
+
+          const originalPreload =
+            path.join(
+              resourcesPath,
+              'preload-gunny-original.js'
+            );
+
+
+          console.log(
+            '[Gunny ARM64] preload started'
+          );
+
+
+          function startRuffle() {
+
             try {
-
-              const path = require("path");
-
-              const { contextBridge } = require("electron");
-
-              const ruffleRoot =
-                path.join(
-                  process.resourcesPath,
-                  "ruffle"
-                );
-
-              const ruffleJS =
-                path.join(
-                  ruffleRoot,
-                  "ruffle.js"
-                );
-
-              console.log(
-                "[Gunny ARM64] Ruffle preload:",
-                ruffleJS
-              );
-
-              const fs =
-                require("fs");
 
               if (
                 !fs.existsSync(
@@ -752,60 +942,201 @@ jobs:
               ) {
 
                 console.error(
-                  "[Gunny ARM64] Ruffle not found:",
+                  '[Ruffle] Missing:',
                   ruffleJS
                 );
 
                 return;
+
               }
 
-              const script =
-                document.createElement(
-                  "script"
+
+              const source =
+                fs.readFileSync(
+                  ruffleJS,
+                  'utf8'
                 );
 
-              script.src =
-                "file://" +
-                ruffleJS;
 
-              script.type =
-                "text/javascript";
+              const publicPath =
+                pathToFileURL(
+                  ruffleRoot + path.sep
+                ).href;
 
-              (
-                document.head ||
-                document.documentElement
-              ).appendChild(
-                script
+
+              const config =
+                JSON.stringify({
+
+                  publicPath:
+                    publicPath,
+
+                  polyfills:
+                    true,
+
+                  favorFlash:
+                    false,
+
+                  allowScriptAccess:
+                    true,
+
+                  allowNetworking:
+                    'all'
+
+                });
+
+
+              const code =
+                `
+                (() => {
+
+                  window.RufflePlayer =
+                    window.RufflePlayer || {};
+
+                  window.RufflePlayer.config =
+                    Object.assign(
+                      {},
+                      window.RufflePlayer.config || {},
+                      ${config}
+                    );
+
+                  ${source}
+
+                  try {
+
+                    const ruffle =
+                      window.RufflePlayer &&
+                      window.RufflePlayer.newest &&
+                      window.RufflePlayer.newest();
+
+                    if (
+                      ruffle &&
+                      typeof ruffle.pluginPolyfill ===
+                      'function'
+                    ) {
+
+                      ruffle.pluginPolyfill();
+
+                      console.log(
+                        '[Ruffle] pluginPolyfill OK'
+                      );
+
+                    }
+
+                    if (
+                      ruffle &&
+                      typeof ruffle.polyfill ===
+                      'function'
+                    ) {
+
+                      ruffle.polyfill();
+
+                      console.log(
+                        '[Ruffle] polyfill OK'
+                      );
+
+                    }
+
+                    console.log(
+                      '[Ruffle] initialized'
+                    );
+
+                  }
+                  catch (error) {
+
+                    console.error(
+                      '[Ruffle] API error:',
+                      error
+                    );
+
+                  }
+
+                })();
+                `;
+
+
+              webFrame.executeJavaScript(
+                code,
+                false
+              ).then(
+                () => {
+
+                  console.log(
+                    '[Ruffle] main-world initialization complete'
+                  );
+
+                }
+              ).catch(
+                (error) => {
+
+                  console.error(
+                    '[Ruffle] executeJavaScript failed:',
+                    error
+                  );
+
+                }
               );
 
-              console.log(
-                "[Gunny ARM64] Ruffle injected."
-              );
-
-            } catch (error) {
+            }
+            catch (error) {
 
               console.error(
-                "[Gunny ARM64] Ruffle preload error:",
+                '[Ruffle] initialization failed:',
                 error
               );
 
             }
 
-          })();
-          JS
+          }
 
-          echo "Ruffle preload created."
+
+          startRuffle();
+
+
+          /*
+           * Preserve the original Gunny preload.
+           */
+
+          if (
+            fs.existsSync(
+              originalPreload
+            )
+          ) {
+
+            try {
+
+              require(
+                originalPreload
+              );
+
+            }
+            catch (error) {
+
+              console.error(
+                '[Gunny] original preload failed:',
+                error
+              );
+
+            }
+
+          }
+          EOF
+
+          node \
+            --check \
+            "$RES/preload-ruffle.js"
+
+          echo
+          echo "Ruffle preload syntax: OK"
 
 
       # ==========================================================
-      # PATCH ELECTRON WINDOWS
+      # 23. PATCH PRELOAD PATH IN MAIN.JS
       #
-      # Instead of modifying a guessed block, find BrowserWindow
-      # preload definitions and append our preload through a
-      # dedicated preload loader.
+      # We replace an existing preload value only when one exists.
+      # We do NOT require app.whenReady().
       # ==========================================================
 
-      - name: Patch BrowserWindow preload
+      - name: Patch preload path
         shell: bash
         run: |
           set -euo pipefail
@@ -821,74 +1152,70 @@ jobs:
           import os
           import re
 
-          main = Path(os.environ["MAIN"])
+          p = Path(
+              os.environ["MAIN"]
+          )
 
-          text = main.read_text(
+          s = p.read_text(
               encoding="utf-8-sig"
           )
 
-          marker = (
-              "console.log('[Gunny ARM64] Ruffle runtime active');"
-          )
 
-          if marker not in text:
+          # ------------------------------------------------------
+          # Replace common preload.js expressions.
+          # ------------------------------------------------------
 
-              injection = r"""
+          patterns = [
 
-          // ======================================================
-          // GUNNY ARM64 RUFFLE
-          // ======================================================
+              (
+                  r"preload\s*:\s*path\.join\(\s*process\.resourcesPath\s*,\s*['\"]preload\.js['\"]\s*\)",
+                  "preload: path.join(process.resourcesPath, 'preload-ruffle.js')"
+              ),
 
-          console.log(
-              '[Gunny ARM64] Ruffle runtime active'
-          );
+              (
+                  r"preload\s*:\s*path\.join\(\s*__dirname\s*,\s*['\"]preload\.js['\"]\s*\)",
+                  "preload: path.join(process.resourcesPath, 'preload-ruffle.js')"
+              ),
 
-          """
+              (
+                  r"preload\s*:\s*['\"][^'\"]*preload\.js['\"]",
+                  "preload: path.join(process.resourcesPath, 'preload-ruffle.js')"
+              )
 
-              # Put the diagnostic code before the first
-              # app lifecycle call if possible.
-
-              positions = [
-                  text.find("app.whenReady"),
-                  text.find("app.on("),
-                  text.find("function createWindow")
-              ]
-
-              positions = [
-                  x for x in positions
-                  if x >= 0
-              ]
-
-              if positions:
-
-                  pos = min(positions)
-
-                  text = (
-                      text[:pos]
-                      + injection
-                      + "\n"
-                      + text[pos:]
-                  )
-
-              else:
-
-                  text = (
-                      injection
-                      + "\n"
-                      + text
-                  )
+          ]
 
 
-          main.write_text(
-              text,
+          changed = False
+
+
+          for pattern, replacement in patterns:
+
+              new_s = re.sub(
+                  pattern,
+                  replacement,
+                  s,
+                  flags=re.IGNORECASE
+              )
+
+              if new_s != s:
+
+                  changed = True
+                  s = new_s
+
+
+          p.write_text(
+              s,
               encoding="utf-8"
           )
 
+
           print(
-              "main.js Ruffle runtime marker installed."
+              "preload path changed:",
+              changed
           )
 
           PY
+
 
           node \
             --check \
@@ -896,9 +1223,7 @@ jobs:
 
 
       # ==========================================================
-      # REMOVE PEPPER FLASH PLUGIN
-      #
-      # Do this only AFTER all resources have been copied.
+      # 24. REMOVE PEPPER FLASH
       # ==========================================================
 
       - name: Remove Pepper Flash
@@ -906,326 +1231,336 @@ jobs:
         run: |
           set -euo pipefail
 
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
+          APP="build/Gunny PC ARM64.app"
 
           PLUGINS="$APP/Contents/Resources/plugins"
 
-          if [ -d "$PLUGINS" ]; then
-
-            echo "Plugin directory:"
-            find "$PLUGINS" \
-              -maxdepth 3 \
-              -print
-
-            find "$PLUGINS" \
-              -iname "*PepperFlash*" \
-              -exec rm -rf {} +
-
-            find "$PLUGINS" \
-              -iname "*pepflashplayer*" \
-              -exec rm -rf {} +
-
-          fi
+          rm -rf \
+            "$PLUGINS"
 
           echo
-          echo "Pepper Flash check:"
+          echo "Pepper Flash search:"
 
-          if find "$APP/Contents/Resources" \
+          if find "$APP" \
+            \( \
               -iname "*PepperFlash*" \
               -o \
-              -iname "*pepflashplayer*" \
-              | grep -q .
+              -iname "*pepflash*" \
+            \) \
+            -print \
+            | grep -q .
           then
 
             echo "ERROR: Pepper Flash still exists."
 
             exit 1
 
-          else
-
-            echo "Pepper Flash removed."
-
           fi
 
+          echo "Pepper Flash: ABSENT"
+
 
       # ==========================================================
-      # REBUILD APP.ASAR
+      # 25. RENAME ELECTRON EXECUTABLE
       # ==========================================================
 
-      - name: Rebuild app.asar
+      - name: Rename Electron executable
         shell: bash
         run: |
           set -euo pipefail
 
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
+          APP="build/Gunny PC ARM64.app"
 
-          rm -f \
-            "$APP/Contents/Resources/app.asar"
+          BIN="$APP/Contents/MacOS"
 
-          asar pack \
-            build/app-source \
-            "$APP/Contents/Resources/app.asar"
+          mv \
+            "$BIN/Electron" \
+            "$BIN/Gunny PC"
 
-          echo
-          echo "app.asar rebuilt."
-
-          ls -lh \
-            "$APP/Contents/Resources/app.asar"
+          chmod +x \
+            "$BIN/Gunny PC"
 
 
       # ==========================================================
-      # INSTALL ARM64 ELECTRON
+      # 26. UPDATE INFO.PLIST
       # ==========================================================
 
-      - name: Download Electron ARM64
+      - name: Update Info.plist
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p \
-            build/electron
+          APP="build/Gunny PC ARM64.app"
 
-          cd build/electron
-
-          npm init \
-            -y \
-            >/dev/null 2>&1
-
-          npm install \
-            --no-save \
-            "electron@${ELECTRON_VERSION}"
-
-          ELECTRON_DIR="$(
-            node -e '
-              console.log(
-                require("electron")
-              )
-            '
-          )"
-
-          echo
-          echo "Electron:"
-          echo "$ELECTRON_DIR"
-
-          if [ ! -d "$ELECTRON_DIR" ]; then
-            echo "ERROR: Electron directory not found."
-            exit 1
-          fi
-
-          echo "$ELECTRON_DIR" \
-            > ../electron-path.txt
-
-
-      # ==========================================================
-      # VERIFY ELECTRON ARM64
-      # ==========================================================
-
-      - name: Verify Electron ARM64
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ELECTRON="$(
-            cat build/electron-path.txt
-          )"
-
-          echo "Electron binary:"
-
-          file \
-            "$ELECTRON/Electron.app/Contents/MacOS/Electron"
-
-          ARCH="$(
-            file \
-              "$ELECTRON/Electron.app/Contents/MacOS/Electron"
-          )"
-
-          if ! echo "$ARCH" \
-              | grep -qi "arm64"
-          then
-
-            echo
-            echo "ERROR: Electron is not ARM64."
-
-            exit 1
-
-          fi
-
-          echo
-          echo "Electron ARM64: OK"
-
-
-      # ==========================================================
-      # REPLACE ELECTRON FRAMEWORK
-      #
-      # Keep Gunny resources/app.asar, replace only Electron's
-      # Chromium framework and helper binaries.
-      # ==========================================================
-
-      - name: Replace Electron runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
-
-          ELECTRON="$(
-            cat build/electron-path.txt
-          )"
-
-          echo "Replacing Electron runtime..."
-
-          rm -rf \
-            "$APP/Contents/Frameworks/Electron Framework.framework"
-
-          cp -R \
-            "$ELECTRON/Electron.app/Contents/Frameworks/Electron Framework.framework" \
-            "$APP/Contents/Frameworks/"
-
-          echo
-          echo "Electron Framework replaced."
-
-
-      # ==========================================================
-      # REPLACE MAIN EXECUTABLE
-      # ==========================================================
-
-      - name: Replace Gunny executable
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
-
-          ELECTRON="$(
-            cat build/electron-path.txt
-          )"
-
-          TARGET="$APP/Contents/MacOS/Gunny PC"
-
-          rm -f "$TARGET"
-
-          cp \
-            "$ELECTRON/Electron.app/Contents/MacOS/Electron" \
-            "$TARGET"
-
-          chmod +x "$TARGET"
-
-          echo
-          echo "Main executable:"
-          file "$TARGET"
-
-
-      # ==========================================================
-      # REPLACE HELPERS
-      # ==========================================================
-
-      - name: Replace Electron helpers
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
-
-          ELECTRON="$(
-            cat build/electron-path.txt
-          )"
-
-          FRAME="$ELECTRON/Electron.app/Contents/Frameworks"
-
-          echo "Replacing helper executables..."
-
-          for HELPER in \
-            "Gunny PC Helper" \
-            "Gunny PC Helper (GPU)" \
-            "Gunny PC Helper (Renderer)" \
-            "Gunny PC Helper (Plugin)"
-          do
-
-            TARGET="$APP/Contents/Frameworks/$HELPER.app"
-
-            if [ -d "$TARGET" ]; then
-
-              case "$HELPER" in
-
-                "Gunny PC Helper")
-                  SOURCE="$FRAME/Electron Helper.app"
-                  ;;
-
-                "Gunny PC Helper (GPU)")
-                  SOURCE="$FRAME/Electron Helper (GPU).app"
-                  ;;
-
-                "Gunny PC Helper (Renderer)")
-                  SOURCE="$FRAME/Electron Helper (Renderer).app"
-                  ;;
-
-                "Gunny PC Helper (Plugin)")
-                  SOURCE="$FRAME/Electron Helper (Plugin).app"
-                  ;;
-
-              esac
-
-              if [ -d "$SOURCE" ]; then
-
-                rm -rf "$TARGET"
-
-                cp -R \
-                  "$SOURCE" \
-                  "$TARGET"
-
-              fi
-
-            fi
-
-          done
-
-
-      # ==========================================================
-      # FIX INFO.PLIST EXECUTABLE
-      # ==========================================================
-
-      - name: Fix Info.plist
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
+          PLIST="$APP/Contents/Info.plist"
 
           /usr/libexec/PlistBuddy \
             -c "Set :CFBundleExecutable Gunny PC" \
-            "$APP/Contents/Info.plist" \
+            "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleName Gunny PC" \
+            "$PLIST" \
+            2>/dev/null \
             || true
 
           /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleExecutable" \
-            "$APP/Contents/Info.plist" \
+            -c "Set :CFBundleDisplayName Gunny PC" \
+            "$PLIST" \
+            2>/dev/null \
             || true
 
+          echo
+          plutil -p \
+            "$PLIST"
+
 
       # ==========================================================
-      # REMOVE OLD CODE SIGNATURE
+      # 27. REMOVE QUARANTINE
       # ==========================================================
 
-      - name: Remove old signatures
+      - name: Remove quarantine
         shell: bash
         run: |
           set -euo pipefail
 
-          APP="$(
-            cat build/gunny-app-path.txt
+          xattr -cr \
+            "build/Gunny PC ARM64.app" \
+            || true
+
+
+      # ==========================================================
+      # 28. VERIFY MAIN ARM64
+      # ==========================================================
+
+      - name: Verify main ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BIN="build/Gunny PC ARM64.app/Contents/MacOS/Gunny PC"
+
+          echo
+          file "$BIN"
+
+          if ! file "$BIN" \
+            | grep -q "arm64"
+          then
+
+            echo "ERROR: Main executable is not ARM64."
+
+            exit 1
+
+          fi
+
+          if file "$BIN" \
+            | grep -q "x86_64"
+          then
+
+            echo "ERROR: x86_64 found."
+
+            exit 1
+
+          fi
+
+          echo
+          echo "Main executable: ARM64"
+
+
+      # ==========================================================
+      # 29. VERIFY RUFFLE
+      # ==========================================================
+
+      - name: Verify Ruffle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/Gunny PC ARM64.app"
+
+          RUFFLE="$APP/Contents/Resources/ruffle"
+
+          test -f \
+            "$RUFFLE/ruffle.js"
+
+          WASM="$(
+            find "$RUFFLE" \
+              -type f \
+              -name "*.wasm" \
+              -print \
+              | head -n 1
           )"
+
+          if [ -z "$WASM" ]; then
+
+            echo "ERROR: Ruffle WASM missing."
+
+            exit 1
+
+          fi
+
+          echo
+          echo "Ruffle:"
+          echo "OK"
+
+          echo
+          echo "JS:"
+          ls -lh \
+            "$RUFFLE/ruffle.js"
+
+          echo
+          echo "WASM:"
+          ls -lh \
+            "$WASM"
+
+
+      # ==========================================================
+      # 30. VERIFY PRELOAD
+      # ==========================================================
+
+      - name: Verify preload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/Gunny PC ARM64.app"
+
+          PRELOAD="$APP/Contents/Resources/preload-ruffle.js"
+
+          test -f \
+            "$PRELOAD"
+
+          node \
+            --check \
+            "$PRELOAD"
+
+          echo
+          echo "Ruffle preload: OK"
+
+
+      # ==========================================================
+      # 31. VERIFY FINAL ASAR
+      # ==========================================================
+
+      - name: Verify final app.asar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/Gunny PC ARM64.app"
+
+          ASAR="$APP/Contents/Resources/app.asar"
+
+          rm -rf \
+            build/final-source
+
+          asar extract \
+            "$ASAR" \
+            build/final-source
+
+          MAIN="$(
+            find build/final-source \
+              -type f \
+              -name "main.js" \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$MAIN" ]; then
+
+            echo "ERROR: final main.js not found."
+
+            exit 1
+
+          fi
+
+          node \
+            --check \
+            "$MAIN"
+
+          echo
+          echo "Final main.js syntax: OK"
+
+          echo
+          echo "Final PPAPI references:"
+
+          grep -RniE \
+            "ppapi-flash-path|ppapi-flash-version" \
+            build/final-source \
+            2>/dev/null \
+            | head -100 \
+            || true
+
+
+      # ==========================================================
+      # 32. FINAL INTEL SCAN
+      # ==========================================================
+
+      - name: Final Intel scan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/Gunny PC ARM64.app"
+
+          echo "=========================================="
+          echo "INTEL BINARY SCAN"
+          echo "=========================================="
+
+          FAILED=0
+
+          while IFS= read -r -d '' FILE
+          do
+
+            INFO="$(
+              file "$FILE" 2>/dev/null \
+              || true
+            )
+
+            if echo "$INFO" \
+              | grep -Eq \
+                "Mach-O.*(x86_64|i386)|executable.*(x86_64|i386)"
+            then
+
+              echo
+              echo "INTEL:"
+              echo "$INFO"
+              echo "$FILE"
+
+              FAILED=1
+
+            fi
+
+          done < <(
+            find "$APP" \
+              -type f \
+              -print0
+          )
+
+
+          if [ "$FAILED" -ne 0 ]; then
+
+            echo
+            echo "ERROR: Intel binaries remain."
+
+            exit 1
+
+          fi
+
+          echo
+          echo "No Intel binaries detected."
+
+
+      # ==========================================================
+      # 33. AD-HOC SIGN
+      # ==========================================================
+
+      - name: Sign application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/Gunny PC ARM64.app"
 
           rm -rf \
             "$APP/Contents/_CodeSignature"
@@ -1237,20 +1572,6 @@ jobs:
             -exec rm -rf {} + \
             || true
 
-
-      # ==========================================================
-      # AD-HOC SIGN
-      # ==========================================================
-
-      - name: Sign ARM64 app
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
-
           codesign \
             --deep \
             --force \
@@ -1258,8 +1579,6 @@ jobs:
             --sign - \
             "$APP"
 
-          echo
-          echo "Code signature:"
           codesign \
             --verify \
             --deep \
@@ -1269,205 +1588,182 @@ jobs:
 
 
       # ==========================================================
-      # FINAL ARCHITECTURE AUDIT
+      # 34. PACKAGE ZIP
       # ==========================================================
 
-      - name: Final ARM64 audit
+      - name: Create ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
-
-          echo "=========================================="
-          echo "FINAL ARM64 AUDIT"
-          echo "=========================================="
-
-          FAILED=0
-
-          while IFS= read -r -d '' FILE
-          do
-
-            INFO="$(
-              file "$FILE" || true
-            )"
-
-            if echo "$INFO" \
-                | grep -Eq \
-                "Mach-O|executable|dynamically linked"
-            then
-
-              echo
-              echo "$INFO"
-
-              if echo "$INFO" \
-                  | grep -Eq \
-                  "x86_64|i386"
-              then
-
-                echo "ERROR: Intel binary:"
-                echo "$FILE"
-
-                FAILED=1
-
-              fi
-
-            fi
-
-          done < <(
-            find "$APP" \
-              -type f \
-              -print0
-          )
-
-          if [ "$FAILED" -ne 0 ]; then
-
-            echo
-            echo "=========================================="
-            echo "ERROR: INTEL BINARIES REMAIN"
-            echo "=========================================="
-
-            exit 1
-
-          fi
-
-          echo
-          echo "=========================================="
-          echo "ARM64 AUDIT PASSED"
-          echo "=========================================="
-
-
-      # ==========================================================
-      # CHECK RUFFLE
-      # ==========================================================
-
-      - name: Final Ruffle audit
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
-
-          RUFFLE="$APP/Contents/Resources/ruffle"
-
-          echo "=========================================="
-          echo "RUFFLE AUDIT"
-          echo "=========================================="
-
-          if [ ! -f "$RUFFLE/ruffle.js" ]; then
-
-            echo "ERROR: ruffle.js missing."
-
-            find "$RUFFLE" \
-              -maxdepth 3 \
-              -type f \
-              -print \
-              || true
-
-            exit 1
-
-          fi
-
-          echo "ruffle.js: OK"
-
-          echo
-          echo "Ruffle files:"
-
-          find "$RUFFLE" \
-            -maxdepth 2 \
-            -type f \
-            | sort
-
-
-      # ==========================================================
-      # FINAL PEPPER FLASH AUDIT
-      # ==========================================================
-
-      - name: Final Flash audit
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
-
-          echo "=========================================="
-          echo "FLASH AUDIT"
-          echo "=========================================="
-
-          echo
-          echo "Pepper Flash files:"
-
-          find "$APP" \
-            -iname "*PepperFlash*" \
-            -o \
-            -iname "*pepflashplayer*" \
-            || true
-
-          echo
-          echo "PPAPI references in app.asar:"
-
-          rm -rf build/final-check
-
-          asar extract \
-            "$APP/Contents/Resources/app.asar" \
-            build/final-check
-
-          grep -RniE \
-            "ppapi-flash-path|ppapi-flash-version" \
-            build/final-check \
-            2>/dev/null \
-            | head -100 \
-            || true
-
-
-      # ==========================================================
-      # PACKAGE
-      # ==========================================================
-
-      - name: Package ARM64 app
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP="$(
-            cat build/gunny-app-path.txt
-          )"
-
-          mkdir -p release
+          rm -f \
+            "release/Gunny-PC-ARM64-Ruffle.zip"
 
           ditto \
-            "$APP" \
-            "release/Gunny PC ARM64.app"
-
-          cd release
-
-          zip \
-            -r \
-            -q \
-            "Gunny-PC-ARM64-Ruffle.zip" \
-            "Gunny PC ARM64.app"
-
-          cd ..
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            "build/Gunny PC ARM64.app" \
+            "release/Gunny-PC-ARM64-Ruffle.zip"
 
           echo
-          echo "Release:"
-          ls -lh release/
+          ls -lh \
+            "release/Gunny-PC-ARM64-Ruffle.zip"
 
 
       # ==========================================================
-      # UPLOAD ARTIFACT
+      # 35. CREATE DMG
       # ==========================================================
 
-      - name: Upload ARM64 build
+      - name: Create DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -f \
+            "release/Gunny-PC-ARM64-Ruffle.dmg"
+
+          mkdir -p \
+            build/dmg
+
+          rm -rf \
+            build/dmg/*
+
+          cp -R \
+            "build/Gunny PC ARM64.app" \
+            build/dmg/
+
+          hdiutil create \
+            -volname "Gunny PC ARM64 Ruffle" \
+            -srcfolder build/dmg \
+            -ov \
+            -format UDZO \
+            "release/Gunny-PC-ARM64-Ruffle.dmg"
+
+          echo
+          ls -lh \
+            "release/Gunny-PC-ARM64-Ruffle.dmg"
+
+
+      # ==========================================================
+      # 36. BUILD REPORT
+      # ==========================================================
+
+      - name: Build report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/Gunny PC ARM64.app"
+
+          BIN="$APP/Contents/MacOS/Gunny PC"
+
+          {
+            echo "=========================================="
+            echo "GUNNY PC ARM64 + RUFFLE"
+            echo "=========================================="
+
+            echo
+            echo "Electron:"
+            echo "$ELECTRON_VERSION"
+
+            echo
+            echo "Ruffle:"
+            echo "$RUFFLE_VERSION"
+
+            echo
+            echo "Architecture:"
+            file "$BIN"
+
+            echo
+            echo "Ruffle:"
+            test -f \
+              "$APP/Contents/Resources/ruffle/ruffle.js" \
+              && echo "OK"
+
+            echo
+            echo "Ruffle WASM:"
+            find \
+              "$APP/Contents/Resources/ruffle" \
+              -type f \
+              -name "*.wasm" \
+              -print
+
+            echo
+            echo "Pepper Flash:"
+            if find "$APP" \
+              \( \
+                -iname "*PepperFlash*" \
+                -o \
+                -iname "*pepflash*" \
+              \) \
+              | grep -q .
+            then
+              echo "FOUND"
+            else
+              echo "ABSENT"
+            fi
+
+            echo
+            echo "PPAPI:"
+            if grep -RniE \
+              "ppapi-flash-path|ppapi-flash-version" \
+              build/final-source \
+              >/dev/null 2>&1
+            then
+              echo "FOUND"
+            else
+              echo "ABSENT"
+            fi
+
+            echo
+            echo "Preload:"
+            test -f \
+              "$APP/Contents/Resources/preload-ruffle.js" \
+              && echo "OK"
+
+          } > \
+            release/build-report.txt
+
+          cat \
+            release/build-report.txt
+
+
+      # ==========================================================
+      # 37. UPLOAD ZIP
+      # ==========================================================
+
+      - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Gunny-PC-ARM64-Ruffle
+          name: Gunny-PC-ARM64-Ruffle-ZIP
           path: release/Gunny-PC-ARM64-Ruffle.zip
+          if-no-files-found: error
+          retention-days: 14
+
+
+      # ==========================================================
+      # 38. UPLOAD DMG
+      # ==========================================================
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-PC-ARM64-Ruffle-DMG
+          path: release/Gunny-PC-ARM64-Ruffle.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+
+      # ==========================================================
+      # 39. UPLOAD REPORT
+      # ==========================================================
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-PC-ARM64-Ruffle-Report
+          path: release/build-report.txt
           if-no-files-found: error
           retention-days: 14
