@@ -1,113 +1,178 @@
-name: Download and Analyze Gunny
+name: Download and Extract Gunny
 
 on:
   workflow_dispatch:
 
 jobs:
-  analyze:
+  download-extract:
     runs-on: macos-14
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install gdown
+      - name: Install tools
         run: |
-          python -m pip install --upgrade pip
-          pip install -U gdown
+          brew install p7zip
 
       - name: Create directories
         run: |
-          mkdir -p input
-          mkdir -p analysis
+          mkdir -p download
+          mkdir -p extracted
 
-      - name: Download Gunny from Google Drive
+      - name: Download Gunny
         run: |
-          gdown \
-            --folder \
-            "https://drive.google.com/drive/folders/17cF-Hb-JUIVcFaeaL-QkGdsku-rnuxby?usp=drive_link" \
-            -O input
+          curl -L \
+            "https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b" \
+            -o download/gunny_download
 
-      - name: Show downloaded files
+      - name: Identify downloaded file
         run: |
-          echo "===== FILES ====="
-          find input -type f -print
+          echo "===== DOWNLOADED FILE ====="
+          ls -lh download/gunny_download
 
-      - name: Find Gunny application
+          echo "===== FILE TYPE ====="
+          file download/gunny_download
+
+      - name: Extract archive
+        shell: bash
         run: |
-          echo "===== APP FILES ====="
-          find input -name "*.app" -print
+          FILE="download/gunny_download"
 
-      - name: Inspect architectures
+          echo "Detecting archive..."
+
+          if file "$FILE" | grep -qi "Zip archive"; then
+            echo "ZIP detected"
+            unzip -o "$FILE" -d extracted
+
+          elif file "$FILE" | grep -qiE "7-zip|7z archive"; then
+            echo "7Z detected"
+            7z x "$FILE" -oextracted
+
+          elif file "$FILE" | grep -qi "gzip compressed"; then
+            echo "GZIP detected"
+            tar -xzf "$FILE" -C extracted
+
+          elif file "$FILE" | grep -qi "Apple Disk Image"; then
+            echo "DMG detected"
+
+            mkdir -p /tmp/gunny-dmg
+
+            hdiutil attach "$FILE" \
+              -mountpoint /tmp/gunny-dmg \
+              -nobrowse \
+              -readonly
+
+            cp -R /tmp/gunny-dmg/. extracted/
+
+            hdiutil detach /tmp/gunny-dmg
+
+          else
+            echo "Unknown format"
+            echo "Keeping original file."
+
+            cp "$FILE" extracted/
+          fi
+
+      - name: Show extracted structure
         run: |
-          echo "===== MACH-O ARCHITECTURES ====="
+          echo "======================================"
+          echo "EXTRACTED STRUCTURE"
+          echo "======================================"
 
-          find input -type f -perm -111 -print0 | while IFS= read -r -d '' file
-          do
-            echo "--------------------------------"
-            echo "$file"
-            file "$file" || true
-          done
+          find extracted -maxdepth 6 -print | sort
 
-      - name: Inspect macOS app structure
+      - name: Find macOS applications
         run: |
-          find input -name "*.app" -type d | while read app
-          do
-            echo "================================"
-            echo "APP: $app"
-            echo "================================"
+          echo "======================================"
+          echo "MACOS APPLICATIONS"
+          echo "======================================"
 
-            find "$app/Contents" -maxdepth 3 -type f | sort
-          done
-
-      - name: Check for Electron
-        run: |
-          echo "===== ELECTRON CHECK ====="
-
-          find input \
-            \( -name "Electron Framework.framework" \
-            -o -name "app.asar" \
-            -o -name "electron" \) \
+          find extracted \
+            -type d \
+            -name "*.app" \
             -print
 
-      - name: Check package.json
+      - name: Analyze executable architectures
         run: |
-          echo "===== PACKAGE.JSON ====="
+          echo "======================================"
+          echo "EXECUTABLE ARCHITECTURES"
+          echo "======================================"
 
-          find input -name "package.json" -type f -print
+          find extracted \
+            -type f \
+            -perm -111 \
+            -print0 |
+          while IFS= read -r -d '' f; do
+            echo
+            echo "--------------------------------------"
+            echo "$f"
+            file "$f"
+          done
 
-          find input -name "package.json" -type f \
-            -exec sh -c 'echo "----- $1 -----"; cat "$1"' _ {} \;
+      - name: Check Electron
+        run: |
+          echo "======================================"
+          echo "ELECTRON CHECK"
+          echo "======================================"
+
+          find extracted \
+            \( \
+              -name "app.asar" \
+              -o -name "Electron Framework.framework" \
+              -o -name "Electron" \
+            \) \
+            -print
+
+      - name: Find package.json
+        run: |
+          echo "======================================"
+          echo "PACKAGE.JSON"
+          echo "======================================"
+
+          find extracted \
+            -name "package.json" \
+            -print
 
       - name: Save analysis
         run: |
           {
-            echo "=== ARCHITECTURE ==="
-            find input -type f -perm -111 -exec file {} \;
+            echo "===== FILE TYPE ====="
+            file download/gunny_download
 
             echo
-            echo "=== APP STRUCTURE ==="
-            find input -name "*.app" -type d -exec find {} -maxdepth 3 -type f \;
+            echo "===== APPLICATIONS ====="
+            find extracted -type d -name "*.app"
 
             echo
-            echo "=== ELECTRON ==="
-            find input \
-              \( -name "Electron Framework.framework" \
-              -o -name "app.asar" \
-              -o -name "electron" \) \
-              -print
+            echo "===== ELECTRON ====="
+            find extracted \
+              \( \
+                -name "app.asar" \
+                -o -name "Electron Framework.framework" \
+                -o -name "Electron" \
+              \)
 
-          } > analysis/report.txt
+            echo
+            echo "===== PACKAGE.JSON ====="
+            find extracted -name "package.json"
 
-          cat analysis/report.txt
+            echo
+            echo "===== EXECUTABLES ====="
+            find extracted -type f -perm -111 -exec file {} \;
+
+          } > download/analysis.txt
+
+          cat download/analysis.txt
+
+      - name: Upload extracted files
+        uses: actions/upload-artifact@v4
+        with:
+          name: gunny-extracted
+          path: extracted/
 
       - name: Upload analysis
         uses: actions/upload-artifact@v4
         with:
           name: gunny-analysis
-          path: analysis/
+          path: download/
