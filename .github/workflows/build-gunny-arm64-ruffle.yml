@@ -357,8 +357,8 @@ jobs:
             "$DST/"
 
             - name: Patch BrowserWindow for Ruffle
-        shell: bash
-        run: |
+          shell: bash
+          run: |
           set -euo pipefail
 
           MAIN="$(cat build/main-path.txt)"
