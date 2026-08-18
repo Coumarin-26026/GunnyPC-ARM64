@@ -1,0 +1,165 @@
+name: Analyze Gunny Intel Pepper Flash
+'on':
+  workflow_dispatch: null
+permissions:
+  contents: read
+env:
+  GUNNY_URL: https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b
+jobs:
+  analyze-pepper-flash:
+    name: Analyze PepperFlashPlayer.plugin
+    runs-on: macos-14
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Install tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        npm install --global @electron/asar
+
+        node --version
+
+        asar --version'
+    - name: Prepare
+      shell: bash
+      run: 'set -euo pipefail
+
+        rm -rf analysis
+
+        mkdir -p analysis/download analysis/app analysis/plugin analysis/reports'
+    - name: Download Gunny Intel
+      shell: bash
+      run: "set -euo pipefail\n\ncurl \\\n  --fail \\\n  --location \\\n  --retry\
+        \ 10 \\\n  --retry-delay 5 \\\n  --connect-timeout 30 \\\n  --max-time 1800\
+        \ \\\n  -A \"Mozilla/5.0\" \\\n  \"$GUNNY_URL\" \\\n  -o analysis/download/gunny-intel.zip\n\
+        \nfile analysis/download/gunny-intel.zip\nls -lh analysis/download/gunny-intel.zip"
+    - name: Extract Gunny app
+      shell: bash
+      run: "set -euo pipefail\n\nunzip \\\n  -q \\\n  -o \\\n  analysis/download/gunny-intel.zip\
+        \ \\\n  -d analysis/app\n\nrm -rf analysis/app/__MACOSX\n\nAPP=\"$(\n  find\
+        \ analysis/app \\\n    -type d \\\n    -name \"*.app\" \\\n    -print \\\n\
+        \    | head -n 1\n)\"\n\nif [ -z \"$APP\" ]; then\n  echo \"ERROR: Gunny .app\
+        \ not found.\"\n  exit 1\nfi\n\nprintf '%s\\n' \"$APP\" > analysis/app-path.txt\n\
+        \necho \"APP:\"\ncat analysis/app-path.txt"
+    - name: Analyze PepperFlash bundle
+      shell: bash
+      run: "set -euo pipefail\n\nAPP=\"$(cat analysis/app-path.txt)\"\n\nPEPPER=\"\
+        $(\n  find \"$APP/Contents/Resources\" \\\n    -type d \\\n    -name \"PepperFlashPlayer.plugin\"\
+        \ \\\n    -print \\\n    | head -n 1\n)\"\n\nif [ -z \"$PEPPER\" ]; then\n\
+        \  echo \"ERROR: PepperFlashPlayer.plugin not found.\"\n  find \"$APP/Contents/Resources\"\
+        \ \\\n    -maxdepth 5 \\\n    -print \\\n    | grep -iE \"pepper|flash|plugin\"\
+        \ \\\n    | head -300 \\\n    || true\n  exit 1\nfi\n\nprintf '%s\\n' \"$PEPPER\"\
+        \ > analysis/pepper-path.txt\n\nBIN=\"$(\n  find \"$PEPPER/Contents/MacOS\"\
+        \ \\\n    -type f \\\n    -print \\\n    | head -n 1\n)\"\n\nif [ -z \"$BIN\"\
+        \ ]; then\n  echo \"ERROR: Pepper executable not found.\"\n  exit 1\nfi\n\n\
+        printf '%s\\n' \"$BIN\" > analysis/pepper-bin.txt\n\necho \"Pepper bundle:\"\
+        \ncat analysis/pepper-path.txt\n\necho\necho \"Pepper executable:\"\ncat analysis/pepper-bin.txt\n\
+        \necho\necho \"Architecture:\"\nfile \"$BIN\"\nlipo -info \"$BIN\" || true"
+    - name: Dump Info.plist and bundle files
+      shell: bash
+      run: "set -euo pipefail\n\nPEPPER=\"$(cat analysis/pepper-path.txt)\"\nPLIST=\"\
+        $PEPPER/Contents/Info.plist\"\n\nif [ ! -f \"$PLIST\" ]; then\n  echo \"ERROR:\
+        \ Info.plist missing.\"\n  exit 1\nfi\n\nplutil \\\n  -p \\\n  \"$PLIST\"\
+        \ \\\n  > analysis/reports/Info-plist.txt\n\nplutil \\\n  -convert json \\\
+        \n  -o analysis/reports/Info-plist.json \\\n  \"$PLIST\"\n\nfind \"$PEPPER/Contents\"\
+        \ \\\n  -maxdepth 5 \\\n  -type f \\\n  -print \\\n  | sort \\\n  > analysis/reports/plugin-files.txt\n\
+        \necho \"=== INFO.PLIST ===\"\ncat analysis/reports/Info-plist.txt\n\necho\n\
+        echo \"=== PLUGIN FILES ===\"\ncat analysis/reports/plugin-files.txt"
+    - name: Analyze Mach-O
+      shell: bash
+      run: "set -euo pipefail\n\nBIN=\"$(cat analysis/pepper-bin.txt)\"\n\n{\n  echo\
+        \ \"=== file ===\"\n  file \"$BIN\"\n\n  echo\n  echo \"=== lipo ===\"\n \
+        \ lipo -info \"$BIN\" || true\n\n  echo\n  echo \"=== Mach-O header ===\"\n\
+        \  otool -hv \"$BIN\" || true\n\n  echo\n  echo \"=== Linked libraries ===\"\
+        \n  otool -L \"$BIN\" || true\n\n  echo\n  echo \"=== Build/version/load commands\
+        \ ===\"\n  otool -l \"$BIN\" \\\n    | grep -A12 -B2 \\\n      -E \\\n   \
+        \   \"LC_BUILD_VERSION|LC_VERSION_MIN|LC_LOAD_DYLIB|LC_RPATH\" \\\n    ||\
+        \ true\n} > analysis/reports/macho.txt\n\ncat analysis/reports/macho.txt"
+    - name: Analyze symbols and strings
+      shell: bash
+      run: "set -euo pipefail\n\nBIN=\"$(cat analysis/pepper-bin.txt)\"\n\nnm \\\n\
+        \  -gU \\\n  \"$BIN\" \\\n  2>/dev/null \\\n  | sort \\\n  > analysis/reports/symbols.txt\
+        \ \\\n  || true\n\ngrep -iE \\\n  \"ppapi|pepper|flash|plugin|mime|browser|javascript|external|interface|PPB_|PPP_\"\
+        \ \\\n  analysis/reports/symbols.txt \\\n  > analysis/reports/symbols-flash-ppapi.txt\
+        \ \\\n  || true\n\nstrings \\\n  -a \\\n  -n 4 \\\n  \"$BIN\" \\\n  > analysis/reports/strings-all.txt\n\
+        \ngrep -iE \\\n  \"Pepper|Flash|Shockwave|PPAPI|PPB_|PPP_|application/x-shockwave-flash|31\\\
+        .0|31\\.0\\.0\\.148|ExternalInterface|fscommand|SharedObject|LocalConnection|SetVariable|GetVariable\"\
+        \ \\\n  analysis/reports/strings-all.txt \\\n  | sort -u \\\n  > analysis/reports/strings-flash-ppapi.txt\
+        \ \\\n  || true\n\necho \"=== FLASH/PPAPI SYMBOLS ===\"\ncat analysis/reports/symbols-flash-ppapi.txt\
+        \ || true\n\necho\necho \"=== FLASH/PPAPI STRINGS ===\"\ncat analysis/reports/strings-flash-ppapi.txt\
+        \ || true"
+    - name: Analyze codesign
+      shell: bash
+      run: "set -euo pipefail\n\nPEPPER=\"$(cat analysis/pepper-path.txt)\"\nBIN=\"\
+        $(cat analysis/pepper-bin.txt)\"\n\n{\n  echo \"=== Bundle signature ===\"\
+        \n  codesign -dvvv \"$PEPPER\" 2>&1 || true\n\n  echo\n  echo \"=== Executable\
+        \ signature ===\"\n  codesign -dvvv \"$BIN\" 2>&1 || true\n\n  echo\n  echo\
+        \ \"=== Verification ===\"\n  codesign --verify --deep --strict --verbose=4\
+        \ \"$PEPPER\" 2>&1 || true\n\n  echo\n  echo \"=== Entitlements ===\"\n  codesign\
+        \ -d --entitlements :- \"$PEPPER\" 2>&1 || true\n} > analysis/reports/codesign.txt\n\
+        \ncat analysis/reports/codesign.txt"
+    - name: Analyze Gunny Flash integration
+      shell: bash
+      run: "set -euo pipefail\n\nAPP=\"$(cat analysis/app-path.txt)\"\nASAR=\"$APP/Contents/Resources/app.asar\"\
+        \n\nrm -rf analysis/source\n\nif [ -f \"$ASAR\" ]; then\n  asar extract \\\
+        \n    \"$ASAR\" \\\n    analysis/source\nfi\n\nMAIN=\"$(\n  find analysis/source\
+        \ \\\n    -type f \\\n    -name \"main.js\" \\\n    -print \\\n    | head\
+        \ -n 1\n)\"\n\n{\n  echo \"=== main.js ===\"\n\n  if [ -n \"$MAIN\" ]; then\n\
+        \    echo \"$MAIN\"\n\n    echo\n    echo \"=== Flash references ===\"\n\n\
+        \    grep -niE \\\n      \"PepperFlashPlayer|ppapi-flash-path|ppapi-flash-version|findFlashPath|appendSwitch|_deployFlashMmsCfg|flash_not_found|plugins\"\
+        \ \\\n      \"$MAIN\" \\\n      | head -1200 \\\n      || true\n\n    echo\n\
+        \    echo \"=== createGameWindow ===\"\n\n    grep -n \\\n      -A140 \\\n\
+        \      -B20 \\\n      \"function createGameWindow\" \\\n      \"$MAIN\" \\\
+        \n      | head -260 \\\n      || true\n  else\n    echo \"main.js not found.\"\
+        \n  fi\n\n  echo\n  echo \"=== SWF/Flash references across app ===\"\n\n \
+        \ grep -RniE \\\n    \"\\.swf|application/x-shockwave-flash|Shockwave Flash|setFlashFocus|FlashVars|flashvars|ExternalInterface\"\
+        \ \\\n    analysis/source \\\n    2>/dev/null \\\n    | head -4000 \\\n  \
+        \  || true\n\n} > analysis/reports/gunny-flash-integration.txt\n\ncat analysis/reports/gunny-flash-integration.txt"
+    - name: Create structured report
+      shell: bash
+      run: "set -euo pipefail\n\nPEPPER=\"$(cat analysis/pepper-path.txt)\"\nBIN=\"\
+        $(cat analysis/pepper-bin.txt)\"\n\npython3 - \"$PEPPER\" \"$BIN\" <<'PY'\n\
+        import json\nimport subprocess\nimport sys\nfrom pathlib import Path\n\npepper\
+        \ = Path(sys.argv[1])\nbinary = Path(sys.argv[2])\n\ndef run(*args):\n   \
+        \ try:\n        return subprocess.check_output(\n            args,\n     \
+        \       stderr=subprocess.STDOUT,\n            text=True\n        ).strip()\n\
+        \    except Exception as error:\n        return str(error)\n\nplist_path =\
+        \ pepper / \"Contents\" / \"Info.plist\"\n\nsummary = {\n    \"pepper_bundle\"\
+        : str(pepper),\n    \"pepper_binary\": str(binary),\n    \"mach_o\": {\n \
+        \       \"file\": run(\"file\", str(binary)),\n        \"lipo\": run(\"lipo\"\
+        , \"-info\", str(binary)),\n        \"linked_libraries\": run(\"otool\", \"\
+        -L\", str(binary))\n    },\n    \"plist\": {},\n    \"indicators\": {}\n}\n\
+        \nif plist_path.is_file():\n    try:\n        raw = subprocess.check_output(\n\
+        \            [\n                \"plutil\",\n                \"-convert\"\
+        ,\n                \"json\",\n                \"-o\",\n                \"\
+        -\",\n                str(plist_path)\n            ],\n            text=True\n\
+        \        )\n        summary[\"plist\"] = json.loads(raw)\n    except Exception\
+        \ as error:\n        summary[\"plist\"] = {\n            \"error\": str(error)\n\
+        \        }\n\nstrings_path = Path(\n    \"analysis/reports/strings-flash-ppapi.txt\"\
+        \n)\n\ndata = \"\"\n\nif strings_path.is_file():\n    data = strings_path.read_text(\n\
+        \        encoding=\"utf-8\",\n        errors=\"ignore\"\n    )\n\nsummary[\"\
+        indicators\"] = {\n    \"Pepper\": \"Pepper\" in data,\n    \"Flash\": \"\
+        Flash\" in data,\n    \"Shockwave\": \"Shockwave\" in data,\n    \"PPAPI\"\
+        : \"PPAPI\" in data or \"PPB_\" in data or \"PPP_\" in data,\n    \"Flash_MIME\"\
+        : \"application/x-shockwave-flash\" in data,\n    \"Flash_31\": \"31.0\" in\
+        \ data,\n    \"Flash_31_0_0_148\": \"31.0.0.148\" in data\n}\n\nPath(\n  \
+        \  \"analysis/reports/STRUCTURED-SUMMARY.json\"\n).write_text(\n    json.dumps(\n\
+        \        summary,\n        indent=2,\n        ensure_ascii=False\n    ),\n\
+        \    encoding=\"utf-8\"\n)\n\nprint(\n    json.dumps(\n        summary,\n\
+        \        indent=2,\n        ensure_ascii=False\n    )\n)\nPY"
+    - name: Package reports
+      shell: bash
+      run: "set -euo pipefail\n\nrm -rf analysis/package\nmkdir -p analysis/package\n\
+        \ncp -R \\\n  analysis/reports \\\n  analysis/package/\n\ncp \\\n  analysis/app-path.txt\
+        \ \\\n  analysis/package/\n\ncp \\\n  analysis/pepper-path.txt \\\n  analysis/package/\n\
+        \ncp \\\n  analysis/pepper-bin.txt \\\n  analysis/package/\n\ncd analysis/package\n\
+        \nzip \\\n  -qr \\\n  ../../gunny-pepperflash-analysis.zip \\\n  .\n\ncd ../..\n\
+        \nls -lh \\\n  gunny-pepperflash-analysis.zip"
+    - name: Upload analysis
+      uses: actions/upload-artifact@v4
+      with:
+        name: Gunny-PepperFlash-31-Analysis
+        path: gunny-pepperflash-analysis.zip
+        if-no-files-found: error
+        retention-days: 14
