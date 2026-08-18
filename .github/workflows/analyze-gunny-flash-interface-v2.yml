@@ -1,0 +1,221 @@
+name: Analyze Gunny Flash Interface
+'on':
+  workflow_dispatch:
+    inputs:
+      server_host:
+        description: Gunny server host, e.g. s737.gn.zing.vn
+        required: false
+        default: s737.gn.zing.vn
+      game_url:
+        description: Optional authenticated Default.aspx URL. Do not put passwords
+          here.
+        required: false
+        default: ''
+      loading_swf_url:
+        description: Optional authenticated Loading.swf URL. Do not put passwords
+          here.
+        required: false
+        default: ''
+permissions:
+  contents: read
+env:
+  GUNNY_URL: https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b
+jobs:
+  analyze-flash-interface:
+    name: Analyze Gunny JavaScript to Flash Interface
+    runs-on: macos-14
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Install tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        npm install --global @electron/asar
+
+        node --version
+
+        asar --version
+
+        python3 --version
+
+        curl --version | head -n 1'
+    - name: Prepare
+      shell: bash
+      run: 'set -euo pipefail
+
+        rm -rf analysis
+
+        mkdir -p analysis/download analysis/source analysis/web analysis/swf analysis/reports'
+    - name: Download Gunny Intel
+      shell: bash
+      run: "set -euo pipefail\ncurl \\\n  --fail \\\n  --location \\\n  --retry 10\
+        \ \\\n  --retry-delay 5 \\\n  --connect-timeout 30 \\\n  --max-time 1800 \\\
+        \n  -A \"Mozilla/5.0\" \\\n  \"$GUNNY_URL\" \\\n  -o analysis/download/gunny-intel.zip\n\
+        file analysis/download/gunny-intel.zip\nls -lh analysis/download/gunny-intel.zip"
+    - name: Extract app.asar
+      shell: bash
+      run: "set -euo pipefail\n\nunzip \\\n  -q \\\n  -o \\\n  analysis/download/gunny-intel.zip\
+        \ \\\n  -d analysis/download\n\nrm -rf analysis/download/__MACOSX\n\nAPP=\"\
+        $(\n  find analysis/download \\\n    -type d \\\n    -name \"*.app\" \\\n\
+        \    -print \\\n    | head -n 1\n)\"\n\nif [ -z \"$APP\" ]; then\n  echo \"\
+        ERROR: Gunny .app not found.\"\n  exit 1\nfi\n\nprintf '%s\\n' \"$APP\" >\
+        \ analysis/app-path.txt\n\nASAR=\"$APP/Contents/Resources/app.asar\"\n\nif\
+        \ [ ! -f \"$ASAR\" ]; then\n  echo \"ERROR: app.asar not found.\"\n  exit\
+        \ 1\nfi\n\nasar extract \"$ASAR\" analysis/source"
+    - name: Extract Flash interface from source
+      shell: bash
+      run: "set -euo pipefail\n\nMAIN=\"$(\n  find analysis/source \\\n    -type f\
+        \ \\\n    -name \"main.js\" \\\n    -print \\\n    | head -n 1\n)\"\n\nif\
+        \ [ -z \"$MAIN\" ]; then\n  echo \"ERROR: main.js not found.\"\n  exit 1\n\
+        fi\n\nprintf '%s\\n' \"$MAIN\" > analysis/main-path.txt\n\n{\n  echo \"===\
+        \ MAIN ===\"\n  echo \"$MAIN\"\n  echo\n  echo \"=== FLASH REFERENCES ===\"\
+        \n  grep -RniE \\\n    \"PepperFlashPlayer|findFlashPath|ppapi-flash-path|ppapi-flash-version|appendSwitch|_deployFlashMmsCfg|flash_not_found|setFlashFocus|FlashVars|flashvars|ExternalInterface|Shockwave|application/x-shockwave-flash|swfobject|\\\
+        .swf\" \\\n    analysis/source \\\n    2>/dev/null \\\n    | head -10000 \\\
+        \n    || true\n} > analysis/reports/static-flash-references.txt\n\ncat analysis/reports/static-flash-references.txt"
+    - name: Extract createGameWindow
+      shell: bash
+      run: "set -euo pipefail\n\nMAIN=\"$(cat analysis/main-path.txt)\"\n\npython3\
+        \ - \"$MAIN\" > analysis/reports/createGameWindow.txt <<'PY'\nimport sys\n\
+        \ntext = open(\n    sys.argv[1],\n    \"r\",\n    encoding=\"utf-8-sig\"\n\
+        ).read()\n\nstart = text.find(\"function createGameWindow\")\n\nif start <\
+        \ 0:\n    print(\"createGameWindow() not found\")\n    raise SystemExit(0)\n\
+        \nbrace = text.find(\"{\", start)\n\nif brace < 0:\n    print(\"Opening brace\
+        \ not found\")\n    raise SystemExit(0)\n\ndepth = 0\nquote = None\nescape\
+        \ = False\nend = -1\n\nfor i in range(brace, len(text)):\n    c = text[i]\n\
+        \n    if quote:\n        if escape:\n            escape = False\n        elif\
+        \ c == \"\\\\\":\n            escape = True\n        elif c == quote:\n  \
+        \          quote = None\n        continue\n\n    if c in (\"'\", '\"') or\
+        \ c == chr(96):\n        quote = c\n        continue\n\n    if c == \"{\"\
+        :\n        depth += 1\n    elif c == \"}\":\n        depth -= 1\n        if\
+        \ depth == 0:\n            end = i + 1\n            break\n\nif end < 0:\n\
+        \    print(\"Closing brace not found\")\n    raise SystemExit(0)\n\nprint(text[start:end])\n\
+        PY\n\ncat analysis/reports/createGameWindow.txt | head -350 || true"
+    - name: Map Flash JavaScript APIs
+      shell: bash
+      run: "set -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ re\n\nroot = Path(\"analysis/source\")\n\npatterns = [\n    r\"\\bsetFlashFocus\\\
+        s*\\(\",\n    r\"\\bExternalInterface\\b\",\n    r\"\\bflashvars?\\b\",\n\
+        \    r\"\\bGetVariable\\s*\\(\",\n    r\"\\bSetVariable\\s*\\(\",\n    r\"\
+        \\bfscommand\\b\",\n    r\"\\bLocalConnection\\b\",\n    r\"\\bSharedObject\\\
+        b\",\n    r\"\\bgetURL\\s*\\(\",\n    r\"\\bcallFunction\\s*\\(\",\n]\n\n\
+        out = Path(\"analysis/reports/flash-api-calls.txt\")\n\nwith out.open(\"w\"\
+        , encoding=\"utf-8\") as handle:\n    count = 0\n\n    for file in root.rglob(\"\
+        *.js\"):\n        try:\n            lines = file.read_text(\n            \
+        \    encoding=\"utf-8\",\n                errors=\"ignore\"\n            ).splitlines()\n\
+        \        except Exception:\n            continue\n\n        for number, line\
+        \ in enumerate(lines, 1):\n            if any(\n                re.search(\n\
+        \                    pattern,\n                    line,\n               \
+        \     flags=re.IGNORECASE\n                )\n                for pattern\
+        \ in patterns\n            ):\n                handle.write(\n           \
+        \         f\"{file}:{number}:{line.strip()}\\n\"\n                )\n    \
+        \            count += 1\n\nprint(f\"Found {count} Flash API-related lines.\"\
+        )\nPY\n\ncat analysis/reports/flash-api-calls.txt | head -3000 || true"
+    - name: Map SWF construction
+      shell: bash
+      run: "set -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ re\n\nroot = Path(\"analysis/source\")\n\npatterns = [\n    r\"<embed[^>]*>\"\
+        ,\n    r\"<object[^>]*>\",\n    r\"swfobject\\.[A-Za-z0-9_]+\\s*\\(\",\n \
+        \   r\"application/x-shockwave-flash\",\n    r\"\\.swf(?:[?\\\"'])\",\n]\n\
+        \nout = Path(\"analysis/reports/swf-construction.txt\")\n\nwith out.open(\"\
+        w\", encoding=\"utf-8\") as handle:\n    count = 0\n\n    for file in root.rglob(\"\
+        *\"):\n        if not file.is_file():\n            continue\n\n        if\
+        \ file.suffix.lower() not in {\n            \".js\", \".html\", \".htm\",\
+        \ \".json\", \".xml\"\n        }:\n            continue\n\n        try:\n\
+        \            lines = file.read_text(\n                encoding=\"utf-8\",\n\
+        \                errors=\"ignore\"\n            ).splitlines()\n        except\
+        \ Exception:\n            continue\n\n        for number, line in enumerate(lines,\
+        \ 1):\n            if any(\n                re.search(\n                 \
+        \   pattern,\n                    line,\n                    flags=re.IGNORECASE\n\
+        \                )\n                for pattern in patterns\n            ):\n\
+        \                handle.write(\n                    f\"{file}:{number}:{line.strip()}\\\
+        n\"\n                )\n                count += 1\n\nprint(f\"Found {count}\
+        \ SWF construction references.\")\nPY\n\ncat analysis/reports/swf-construction.txt\
+        \ | head -3000 || true"
+    - name: Fetch public Gunny web dependencies
+      shell: bash
+      run: "set -euo pipefail\n\nBASE=\"https://${SERVER_HOST}\"\n\ncat > analysis/web/urls.txt\
+        \ <<EOF\n${BASE}/scripts/Jquery.js\n${BASE}/scripts/swfobject.js\n${BASE}/scripts/swfobjectVer.js\n\
+        ${BASE}/scripts/doVersion.js\n${BASE}/scripts/isSafeFlash.js\n${BASE}/scripts/rightClick.js\n\
+        ${BASE}/scripts/prototype.js\n${BASE}/scripts/popup/prototype.js\n${BASE}/scripts/popup/script/popup.js\n\
+        ${BASE}/scripts/dandantang.js\n${BASE}/config.xml\nEOF\n\n: > analysis/web/download-results.txt\n\
+        \ni=0\n\nwhile IFS= read -r URL; do\n    [ -z \"$URL\" ] && continue\n\n \
+        \   i=$((i + 1))\n\n    safe=\"$(\n      printf '%s' \"$URL\" |\n        sed\
+        \ 's#https\\?://##' |\n        tr '/:?&=' '_'\n    )\"\n\n    dest=\"analysis/web/${i}-${safe}\"\
+        \n\n    echo \"Fetching: $URL\"\n\n    if curl \\\n        --fail \\\n   \
+        \     --location \\\n        --retry 4 \\\n        --retry-delay 2 \\\n  \
+        \      --connect-timeout 20 \\\n        --max-time 120 \\\n        -A \"Mozilla/5.0\"\
+        \ \\\n        \"$URL\" \\\n        -o \"$dest\"\n    then\n        printf\
+        \ '%s -> %s -> %s\\n' \\\n          \"$URL\" \\\n          \"$dest\" \\\n\
+        \          \"$(file \"$dest\")\" \\\n          | tee -a analysis/web/download-results.txt\n\
+        \    else\n        printf 'FAILED %s\\n' \"$URL\" \\\n          | tee -a analysis/web/download-results.txt\n\
+        \        rm -f \"$dest\"\n    fi\ndone < analysis/web/urls.txt\n\ncat analysis/web/download-results.txt"
+      env:
+        SERVER_HOST: ${{ inputs.server_host }}
+    - name: Analyze web Flash detection
+      shell: bash
+      run: "set -euo pipefail\n\n{\n  echo \"=== DETECTION ===\"\n  grep -RniE \\\n\
+        \    \"Shockwave Flash|PepperFlash|Flash Player|application/x-shockwave-flash|navigator\\\
+        .plugins|navigator\\.mimeTypes|31\\.0|31\\.0\\.0\\.148|plugin\" \\\n    analysis/web\
+        \ \\\n    2>/dev/null \\\n    | head -5000 \\\n    || true\n\n  echo\n  echo\
+        \ \"=== API ===\"\n  grep -RniE \\\n    \"setFlashFocus|ExternalInterface|FlashVars|flashvars|GetVariable|SetVariable|fscommand|swfobject|\\\
+        .swf|embed|object\" \\\n    analysis/web \\\n    2>/dev/null \\\n    | head\
+        \ -5000 \\\n    || true\n} > analysis/reports/web-flash-interface.txt\n\n\
+        cat analysis/reports/web-flash-interface.txt"
+    - name: Optional authenticated page analysis
+      shell: bash
+      run: "set -euo pipefail\n\nif [ -z \"$GAME_URL\" ]; then\n  echo \"No authenticated\
+        \ game URL supplied; skipping.\"\n  exit 0\nfi\n\necho \"Fetching authenticated\
+        \ game page.\"\necho \"The full URL is intentionally not printed.\"\n\ncurl\
+        \ \\\n  --fail \\\n  --location \\\n  --retry 3 \\\n  --connect-timeout 20\
+        \ \\\n  --max-time 180 \\\n  -A \"Mozilla/5.0\" \\\n  \"$GAME_URL\" \\\n \
+        \ -o analysis/web/Default.aspx.html\n\n{\n  echo \"=== SCRIPT SRC ===\"\n\
+        \  grep -oiE \\\n    \"<script[^>]+src=[\\\"'][^\\\"' ]+[\\\"']\" \\\n   \
+        \ analysis/web/Default.aspx.html \\\n    | sort -u \\\n    || true\n\n  echo\n\
+        \  echo \"=== EMBED/OBJECT ===\"\n  grep -oiE \\\n    \"<(embed|object)[^>]*>\"\
+        \ \\\n    analysis/web/Default.aspx.html \\\n    | head -200 \\\n    || true\n\
+        \n  echo\n  echo \"=== FLASH REFERENCES ===\"\n  grep -niE \\\n    \"Loading\\\
+        .swf|config\\.xml|setFlashFocus|FlashVars|flashvars|application/x-shockwave-flash|Shockwave\
+        \ Flash|swfobject\" \\\n    analysis/web/Default.aspx.html \\\n    | head\
+        \ -2000 \\\n    || true\n} > analysis/reports/live-game-page.txt\n\ncat analysis/reports/live-game-page.txt"
+      env:
+        GAME_URL: ${{ inputs.game_url }}
+    - name: Optional Loading.swf analysis
+      shell: bash
+      run: "set -euo pipefail\n\nif [ -z \"$LOADING_SWF_URL\" ]; then\n  echo \"No\
+        \ Loading.swf URL supplied; skipping.\"\n  exit 0\nfi\n\ncurl \\\n  --fail\
+        \ \\\n  --location \\\n  --retry 5 \\\n  --retry-delay 2 \\\n  --connect-timeout\
+        \ 20 \\\n  --max-time 600 \\\n  -A \"Mozilla/5.0\" \\\n  \"$LOADING_SWF_URL\"\
+        \ \\\n  -o analysis/swf/Loading.swf\n\nfile analysis/swf/Loading.swf\nls -lh\
+        \ analysis/swf/Loading.swf\n\nstrings \\\n  -a \\\n  -n 4 \\\n  analysis/swf/Loading.swf\
+        \ \\\n  > analysis/swf/strings.txt \\\n  || true\n\ngrep -iE \\\n  \"ExternalInterface|setFlashFocus|FlashVars|flashvars|fscommand|SharedObject|LocalConnection|getURL|navigateToURL|Socket|connect|http|https|Loading|config\"\
+        \ \\\n  analysis/swf/strings.txt \\\n  | sort -u \\\n  > analysis/reports/loading-swf-strings.txt\
+        \ \\\n  || true\n\ncat analysis/reports/loading-swf-strings.txt || true"
+      env:
+        LOADING_SWF_URL: ${{ inputs.loading_swf_url }}
+    - name: Build interface report
+      shell: bash
+      run: "set -euo pipefail\n\n{\n  echo \"# Gunny Flash Interface Map\"\n  echo\n\
+        \  echo \"Generated: $(date -u)\"\n  echo\n  echo \"## Static Flash references\"\
+        \n  cat analysis/reports/static-flash-references.txt || true\n  echo\n  echo\
+        \ \"## createGameWindow\"\n  cat analysis/reports/createGameWindow.txt ||\
+        \ true\n  echo\n  echo \"## Flash API calls\"\n  cat analysis/reports/flash-api-calls.txt\
+        \ || true\n  echo\n  echo \"## SWF construction\"\n  cat analysis/reports/swf-construction.txt\
+        \ || true\n  echo\n  echo \"## Public web dependencies\"\n  cat analysis/reports/web-flash-interface.txt\
+        \ || true\n  echo\n  echo \"## Authenticated game page\"\n  cat analysis/reports/live-game-page.txt\
+        \ 2>/dev/null || true\n  echo\n  echo \"## Loading.swf\"\n  cat analysis/reports/loading-swf-strings.txt\
+        \ 2>/dev/null || true\n} > analysis/reports/GUNNY-FLASH-INTERFACE-MAP.md\n\
+        \ncat analysis/reports/GUNNY-FLASH-INTERFACE-MAP.md"
+    - name: Package analysis
+      shell: bash
+      run: "set -euo pipefail\n\nmkdir -p analysis/package\n\ncp -R analysis/reports\
+        \ analysis/package/\ncp -R analysis/web analysis/package/\n\nif [ -d analysis/swf\
+        \ ]; then\n  cp -R analysis/swf analysis/package/\nfi\n\n(\n  cd analysis/package\n\
+        \  zip -qr ../../gunny-flash-interface-analysis.zip .\n)\n\nls -lh gunny-flash-interface-analysis.zip"
+    - name: Upload analysis
+      uses: actions/upload-artifact@v4
+      with:
+        name: Gunny-Flash-Interface-Analysis
+        path: gunny-flash-interface-analysis.zip
+        if-no-files-found: error
+        retention-days: 14
