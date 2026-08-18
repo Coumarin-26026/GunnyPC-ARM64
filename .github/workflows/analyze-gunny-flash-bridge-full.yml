@@ -1,0 +1,949 @@
+name: Analyze Gunny Flash Bridge - Full
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GUNNY_URL: "https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b"
+
+jobs:
+  analyze:
+    name: Analyze Gunny Intel Flash Runtime
+    runs-on: macos-14
+
+    steps:
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm install --global @electron/asar
+
+          echo "Node:"
+          node --version
+
+          echo
+          echo "ASAR:"
+          asar --version
+
+          echo
+          echo "Python:"
+          python3 --version
+
+          echo
+          echo "Bash:"
+          bash --version | head -1
+
+      - name: Prepare analysis directories
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf analysis
+
+          mkdir -p \
+            analysis/downloads \
+            analysis/original \
+            analysis/source \
+            analysis/results \
+            analysis/runtime \
+            analysis/tools
+
+      - name: Download original Gunny Intel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl \
+            --fail \
+            --location \
+            --retry 10 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            -A "Mozilla/5.0" \
+            "$GUNNY_URL" \
+            -o analysis/downloads/gunny-intel.zip
+
+          file analysis/downloads/gunny-intel.zip
+
+          echo
+          ls -lh analysis/downloads/gunny-intel.zip
+
+      - name: Extract original Gunny
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p \
+            analysis/original/unpacked
+
+          unzip \
+            -q \
+            -o \
+            analysis/downloads/gunny-intel.zip \
+            -d analysis/original/unpacked
+
+          rm -rf \
+            analysis/original/unpacked/__MACOSX
+
+          APP="$(
+            find analysis/original/unpacked \
+              -type d \
+              -name "*.app" \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$APP" ]; then
+            echo "ERROR: Gunny .app not found."
+            exit 1
+          fi
+
+          printf '%s\n' "$APP" \
+            > analysis/original/app-path.txt
+
+          echo "Gunny app:"
+          cat analysis/original/app-path.txt
+
+      - name: Analyze app architecture and embedded Pepper Flash
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(cat analysis/original/app-path.txt)"
+
+          MAIN="$APP/Contents/MacOS/Gunny PC"
+
+          PEPPER="$APP/Contents/Resources/plugins/PepperFlashPlayer.plugin/Contents/MacOS/PepperFlashPlayer"
+
+          {
+            echo "=== MAIN EXECUTABLE ==="
+            file "$MAIN"
+            lipo -info "$MAIN" || true
+
+            echo
+            echo "=== PEPPER FLASH ==="
+            file "$PEPPER"
+            lipo -info "$PEPPER" || true
+
+            echo
+            echo "=== PEPPER INFO.PLIST ==="
+
+            if [ -f \
+              "$APP/Contents/Resources/plugins/PepperFlashPlayer.plugin/Contents/Info.plist"
+            ]; then
+              plutil -p \
+                "$APP/Contents/Resources/plugins/PepperFlashPlayer.plugin/Contents/Info.plist"
+            else
+              echo "Pepper Flash Info.plist not found."
+            fi
+
+            echo
+            echo "=== PLUGINS DIRECTORY ==="
+
+            find \
+              "$APP/Contents/Resources/plugins" \
+              -maxdepth 4 \
+              -print \
+              2>/dev/null \
+              | sort \
+              | head -500
+
+          } > analysis/results/app-architecture.txt
+
+          cat analysis/results/app-architecture.txt
+
+      - name: Extract app.asar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(cat analysis/original/app-path.txt)"
+
+          ASAR="$APP/Contents/Resources/app.asar"
+
+          if [ ! -f "$ASAR" ]; then
+            echo "ERROR: app.asar missing."
+            exit 1
+          fi
+
+          rm -rf \
+            analysis/source/app
+
+          mkdir -p \
+            analysis/source/app
+
+          asar extract \
+            "$ASAR" \
+            analysis/source/app
+
+          echo "app.asar extracted."
+
+      - name: Inventory source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "=== FILE COUNT ==="
+
+            find analysis/source/app \
+              -type f \
+              | wc -l
+
+            echo
+            echo "=== JAVASCRIPT ==="
+
+            find analysis/source/app \
+              -type f \
+              -name "*.js" \
+              -print \
+              | sort \
+              | head -1000
+
+            echo
+            echo "=== HTML ==="
+
+            find analysis/source/app \
+              -type f \
+              \( \
+                -name "*.html" \
+                -o \
+                -name "*.htm" \
+              \) \
+              -print \
+              | sort \
+              | head -500
+
+            echo
+            echo "=== CSS ==="
+
+            find analysis/source/app \
+              -type f \
+              -name "*.css" \
+              -print \
+              | sort \
+              | head -500
+
+            echo
+            echo "=== JSON / XML ==="
+
+            find analysis/source/app \
+              -type f \
+              \( \
+                -name "*.json" \
+                -o \
+                -name "*.xml" \
+              \) \
+              -print \
+              | sort \
+              | head -500
+
+          } > analysis/results/source-inventory.txt
+
+          cat analysis/results/source-inventory.txt
+
+      - name: Locate main process and all preloads
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN="$(
+            find analysis/source/app \
+              -type f \
+              -name "main.js" \
+              -print \
+              | while IFS= read -r file; do
+                  if grep -q \
+                    -E \
+                    "BrowserWindow|findFlashPath|PepperFlashPlayer" \
+                    "$file" \
+                    2>/dev/null
+                  then
+                    echo "$file"
+                    break
+                  fi
+                done
+          )"
+
+          if [ -z "$MAIN" ]; then
+            echo "ERROR: Gunny main.js not identified."
+            exit 1
+          fi
+
+          printf '%s\n' "$MAIN" \
+            > analysis/main-path.txt
+
+          {
+            echo "=== MAIN.JS ==="
+            cat analysis/main-path.txt
+
+            echo
+            echo "=== PRELOAD FILES ==="
+
+            find analysis/source/app \
+              -type f \
+              -name "*preload*.js" \
+              -print \
+              | sort
+
+          } > analysis/results/entrypoints.txt
+
+          cat analysis/results/entrypoints.txt
+
+      - name: Analyze main.js Flash configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN="$(cat analysis/main-path.txt)"
+
+          {
+            echo "=== FLASH DISCOVERY ==="
+
+            grep -niE \
+              "findFlashPath|PepperFlashPlayer|pepflash|ppapi-flash-path|ppapi-flash-version|flashPath|Flash" \
+              "$MAIN" \
+              | head -2000 \
+              || true
+
+            echo
+            echo "=== BROWSER WINDOWS ==="
+
+            grep -niE \
+              "BrowserWindow|webPreferences|contextIsolation|sandbox|plugins|preload" \
+              "$MAIN" \
+              | head -3000 \
+              || true
+
+            echo
+            echo "=== LOADING / NAVIGATION ==="
+
+            grep -niE \
+              "loadURL|loadFile|window.open|webContents|openDevTools|executeJavaScript" \
+              "$MAIN" \
+              | head -3000 \
+              || true
+
+            echo
+            echo "=== IPC ==="
+
+            grep -niE \
+              "ipcMain|ipcRenderer|contextBridge|send|invoke|handle|on\(" \
+              "$MAIN" \
+              | head -4000 \
+              || true
+
+          } > analysis/results/main-analysis.txt
+
+          cat analysis/results/main-analysis.txt
+
+      - name: Extract full createGameWindow block
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN="$(cat analysis/main-path.txt)"
+
+          python3 - "$MAIN" > analysis/results/create-game-window.txt <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text(
+              encoding="utf-8-sig"
+          )
+
+          start = text.find(
+              "function createGameWindow"
+          )
+
+          if start < 0:
+              print("createGameWindow not found")
+              raise SystemExit(0)
+
+          brace = text.find(
+              "{",
+              start
+          )
+
+          if brace < 0:
+              print("createGameWindow opening brace not found")
+              raise SystemExit(0)
+
+          depth = 0
+          quote = None
+          escape = False
+
+          for i in range(
+              brace,
+              len(text)
+          ):
+              c = text[i]
+
+              if quote:
+                  if escape:
+                      escape = False
+                  elif c == "\\":
+                      escape = True
+                  elif c == quote:
+                      quote = None
+                  continue
+
+              if c in ("'", '"', "`"):
+                  quote = c
+                  continue
+
+              if c == "{":
+                  depth += 1
+
+              elif c == "}":
+                  depth -= 1
+
+                  if depth == 0:
+                      print(
+                          text[start:i + 1]
+                      )
+                      raise SystemExit(0)
+
+          print(
+              "createGameWindow closing brace not found"
+          )
+          PY
+
+          cat \
+            analysis/results/create-game-window.txt
+
+      - name: Analyze every preload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="analysis/results/preloads-analysis.txt"
+
+          : > "$OUT"
+
+          while IFS= read -r FILE; do
+
+            echo \
+              "##################################################" \
+              >> "$OUT"
+
+            echo \
+              "FILE: $FILE" \
+              >> "$OUT"
+
+            echo \
+              "##################################################" \
+              >> "$OUT"
+
+            echo \
+              >> "$OUT"
+
+            grep -niE \
+              "contextBridge|ipcRenderer|ipcMain|fs|path|webFrame|document|window|flash|Flash|embed|object|focus|ready" \
+              "$FILE" \
+              >> "$OUT" \
+              || true
+
+            echo \
+              >> "$OUT"
+
+          done < <(
+            find analysis/source/app \
+              -type f \
+              -name "*preload*.js" \
+              -print \
+              | sort
+          )
+
+          cat "$OUT"
+
+      - name: Search all Flash and SWF references
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "=== FLASH TERMS ==="
+
+            grep -RniE \
+              "Flash|flash|Shockwave|SWF|swf|PepperFlash|PepFlash|PPAPI|application/x-shockwave-flash" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+            echo
+            echo "=== SWF FILE/PATH REFERENCES ==="
+
+            grep -RniE \
+              "Loading\.swf|[A-Za-z0-9_./-]+\.swf|/flash/|flash/" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -10000 \
+              || true
+
+            echo
+            echo "=== EMBED / OBJECT CREATION ==="
+
+            grep -RniE \
+              "<embed|<object|createElement[[:space:]]*\([[:space:]]*['\"]embed|createElement[[:space:]]*\([[:space:]]*['\"]object" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+            echo
+            echo "=== FLASHVARS / CONFIG ==="
+
+            grep -RniE \
+              "flashvars|FlashVars|config\.xml|desktopType|Loading\.swf|res[0-9]+\.gn\.zing\.vn" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+          } > analysis/results/flash-swf-search.txt
+
+          cat analysis/results/flash-swf-search.txt
+
+      - name: Search Flash JavaScript bridges
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "=== ExternalInterface / ActionScript BRIDGE ==="
+
+            grep -RniE \
+              "ExternalInterface|CallFunction|callFunction|SetVariable|GetVariable|fscommand|sendToActionScript" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+            echo
+            echo "=== FOCUS / READY ==="
+
+            grep -RniE \
+              "setFlashFocus|FlashFocus|flashFocus|focusFlash|setFocus|flash-ready|flashReady|flash_ready|flash.*ready" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+            echo
+            echo "=== CALLBACKS ==="
+
+            grep -RniE \
+              "callback|onFlash|fromFlash|toFlash|flashCallback|gameReady|game-ready" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+            echo
+            echo "=== PLUGIN DETECTION ==="
+
+            grep -RniE \
+              "navigator\.plugins|navigator\.mimeTypes|plugins\.length|mimeTypes|Shockwave Flash|application/x-shockwave-flash" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+          } > analysis/results/flash-bridge-search.txt
+
+          cat analysis/results/flash-bridge-search.txt
+
+      - name: Search Electron bridge architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "=== contextBridge ==="
+
+            grep -Rni \
+              "contextBridge" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -3000 \
+              || true
+
+            echo
+            echo "=== ipcRenderer ==="
+
+            grep -Rni \
+              "ipcRenderer" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+            echo
+            echo "=== ipcMain ==="
+
+            grep -Rni \
+              "ipcMain" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+            echo
+            echo "=== webContents.executeJavaScript ==="
+
+            grep -Rni \
+              "executeJavaScript" \
+              analysis/source/app \
+              2>/dev/null \
+              | head -3000 \
+              || true
+
+          } > analysis/results/electron-bridge-search.txt
+
+          cat analysis/results/electron-bridge-search.txt
+
+      - name: Search literal absolute SWF URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : > analysis/results/swf-urls.txt
+
+          grep -RhoE \
+            'https?://[^[:space:]"]+\.swf[^[:space:]"]*' \
+            analysis/source/app \
+            2>/dev/null \
+            | sort -u \
+            | head -100 \
+            > analysis/results/swf-urls.txt \
+            || true
+
+          if [ -s analysis/results/swf-urls.txt ]; then
+            echo "Absolute SWF URLs:"
+            cat analysis/results/swf-urls.txt
+          else
+            echo "No literal absolute SWF URLs found."
+          fi
+
+      - name: Download literal SWF URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : > analysis/results/swf-downloads.txt
+
+          if [ ! -s analysis/results/swf-urls.txt ]; then
+            echo "No SWF URLs to download."
+            exit 0
+          fi
+
+          INDEX=0
+
+          while IFS= read -r URL; do
+
+            [ -z "$URL" ] && continue
+
+            INDEX=$((INDEX + 1))
+
+            OUTPUT="analysis/downloads/swf-${INDEX}.swf"
+
+            echo
+            echo "=========================================="
+            echo "SWF #${INDEX}"
+            echo "=========================================="
+
+            echo "$URL"
+
+            if curl \
+              --fail \
+              --location \
+              --retry 5 \
+              --retry-delay 2 \
+              --connect-timeout 20 \
+              --max-time 300 \
+              -A "Mozilla/5.0" \
+              "$URL" \
+              -o "$OUTPUT"
+            then
+
+              TYPE="$(file "$OUTPUT")"
+
+              SIZE="$(
+                stat \
+                  -f '%z' \
+                  "$OUTPUT" \
+                  2>/dev/null \
+                  || echo 0
+              )"
+
+              printf '%s\n' \
+                "[$INDEX] OK | $URL | $OUTPUT | $TYPE | $SIZE bytes" \
+                >> analysis/results/swf-downloads.txt
+
+              echo "$TYPE"
+              echo "$SIZE bytes"
+
+            else
+
+              printf '%s\n' \
+                "[$INDEX] FAILED | $URL" \
+                >> analysis/results/swf-downloads.txt
+
+              rm -f "$OUTPUT"
+
+            fi
+
+          done < analysis/results/swf-urls.txt
+
+          echo
+          cat analysis/results/swf-downloads.txt
+
+      - name: Analyze downloaded SWF strings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="analysis/results/swf-analysis.txt"
+
+          : > "$OUT"
+
+          SWF_COUNT=0
+
+          while IFS= read -r SWF; do
+
+            SWF_COUNT=$((SWF_COUNT + 1))
+
+            echo \
+              "##################################################" \
+              >> "$OUT"
+
+            echo \
+              "SWF: $SWF" \
+              >> "$OUT"
+
+            echo \
+              "##################################################" \
+              >> "$OUT"
+
+            file "$SWF" \
+              >> "$OUT" \
+              || true
+
+            echo \
+              >> "$OUT"
+
+            strings \
+              "$SWF" \
+              | grep -Ei \
+                "setFlashFocus|ExternalInterface|fscommand|CallFunction|callFunction|flash|focus|ready|load|config|http|socket" \
+              | head -2000 \
+              >> "$OUT" \
+              || true
+
+            echo \
+              >> "$OUT"
+
+          done < <(
+            find analysis/downloads \
+              -type f \
+              -name "*.swf" \
+              -print \
+              | sort
+          )
+
+          echo "Analyzed SWF count: $SWF_COUNT"
+
+          cat "$OUT"
+
+      - name: Search local app resources for SWF names
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(cat analysis/original/app-path.txt)"
+
+          {
+            echo "=== ALL RESOURCE FILENAMES CONTAINING SWF/FLASH ==="
+
+            find "$APP/Contents/Resources" \
+              -type f \
+              | grep -Ei \
+                "\.swf$|flash|pepper" \
+              | sort \
+              | head -3000 \
+              || true
+
+            echo
+            echo "=== RESOURCE STRINGS ==="
+
+            grep -RniE \
+              "Loading\.swf|\.swf|Flash|PepperFlash" \
+              "$APP/Contents/Resources" \
+              2>/dev/null \
+              | head -5000 \
+              || true
+
+          } > analysis/results/resource-search.txt
+
+          cat analysis/results/resource-search.txt
+
+      - name: Generate candidate bridge map
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="analysis/results/RUFFLE-MAPPING.md"
+
+          cat > "$OUT" <<'EOF'
+          # Gunny Intel Flash -> Ruffle analysis map
+
+          This file is generated by GitHub Actions.
+
+          ## Flash runtime
+
+          - [ ] PepperFlashPlayer.plugin path
+          - [ ] PPAPI path/version switches
+          - [ ] plugin name/version expected by Gunny
+
+          ## Flash HTML integration
+
+          - [ ] `<embed>` creation
+          - [ ] `<object>` creation
+          - [ ] `application/x-shockwave-flash`
+          - [ ] navigator.plugins
+          - [ ] navigator.mimeTypes
+          - [ ] Shockwave Flash version detection
+
+          ## SWF loading
+
+          - [ ] Loading.swf
+          - [ ] FlashVars
+          - [ ] config.xml
+          - [ ] SWF URL construction
+          - [ ] dynamic URL/query parameters
+
+          ## JavaScript -> Flash
+
+          - [ ] ExternalInterface
+          - [ ] CallFunction
+          - [ ] SetVariable
+          - [ ] fscommand
+          - [ ] plugin methods
+
+          ## Flash -> JavaScript
+
+          - [ ] setFlashFocus
+          - [ ] flash-ready
+          - [ ] game-ready
+          - [ ] callbacks
+          - [ ] focus/blur
+          - [ ] ExternalInterface callbacks
+
+          ## Electron
+
+          - [ ] game BrowserWindow
+          - [ ] webPreferences
+          - [ ] preload
+          - [ ] ipcRenderer
+          - [ ] ipcMain
+          - [ ] contextBridge
+          - [ ] webContents.executeJavaScript
+
+          ## Ruffle implementation targets
+
+          - [ ] pluginPolyfill
+          - [ ] polyfill
+          - [ ] publicPath
+          - [ ] WASM
+          - [ ] networking
+          - [ ] MIME/plugin emulation
+          - [ ] Flash JS bridge
+          - [ ] Gunny-specific callbacks
+          EOF
+
+          echo "Generated:"
+          cat "$OUT"
+
+      - name: Build analysis summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "# Gunny Flash Runtime Analysis"
+            echo
+            echo "Generated: $(date)"
+            echo
+            echo "## Key source searches"
+            echo
+            echo "### Flash/SWF"
+            grep -RniE \
+              "Loading\.swf|Shockwave|ExternalInterface|navigator\.plugins|navigator\.mimeTypes" \
+              analysis/results \
+              2>/dev/null \
+              | head -300 \
+              || true
+
+            echo
+            echo "### Flash bridge"
+            grep -RniE \
+              "setFlashFocus|flash-ready|ExternalInterface|fscommand|CallFunction|callback" \
+              analysis/results \
+              2>/dev/null \
+              | head -300 \
+              || true
+
+            echo
+            echo "### Electron bridge"
+            grep -RniE \
+              "contextBridge|ipcRenderer|ipcMain|executeJavaScript|preload" \
+              analysis/results \
+              2>/dev/null \
+              | head -300 \
+              || true
+
+            echo
+            echo "### SWF downloads"
+            cat \
+              analysis/results/swf-downloads.txt \
+              2>/dev/null \
+              || true
+
+          } > analysis/results/ANALYSIS-SUMMARY.md
+
+          cat analysis/results/ANALYSIS-SUMMARY.md
+
+      - name: Create analysis archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd analysis
+
+          zip \
+            -qr \
+            ../gunny-flash-analysis-full.zip \
+            results \
+            main-path.txt \
+            original/app-path.txt
+
+          cd ..
+
+          ls -lh \
+            gunny-flash-analysis-full.zip
+
+      - name: Upload analysis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-Flash-Analysis-Full
+          path: gunny-flash-analysis-full.zip
+          if-no-files-found: error
+          retention-days: 14
