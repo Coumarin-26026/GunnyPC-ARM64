@@ -1,0 +1,204 @@
+name: Analyze Gunny Runtime Flash Bridge
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GUNNY_URL: "https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b"
+
+jobs:
+  runtime-analysis:
+    name: Runtime capture of Gunny Flash bridge
+    runs-on: macos-14
+
+    steps:
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @electron/asar
+          node --version
+          asar --version
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf analysis runtime-capture
+          mkdir -p analysis/original analysis/source analysis/results runtime-capture
+
+      - name: Download original Gunny
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl             --fail             --location             --retry 10             --retry-delay 5             --connect-timeout 30             --max-time 1800             -A "Mozilla/5.0"             "$GUNNY_URL"             -o analysis/gunny-intel.zip
+          file analysis/gunny-intel.zip
+
+      - name: Extract original Gunny
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -q -o analysis/gunny-intel.zip -d analysis/original
+          rm -rf analysis/original/__MACOSX
+
+          APP="$(
+            find analysis/original               -type d               -name "*.app"               -print               | head -n 1
+          )"
+
+          if [ -z "$APP" ]; then
+            echo "ERROR: Gunny app not found."
+            exit 1
+          fi
+
+          printf '%s\n' "$APP" > analysis/original/app.txt
+          cat analysis/original/app.txt
+
+      - name: Extract app.asar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(cat analysis/original/app.txt)"
+
+          rm -rf analysis/source/app
+          mkdir -p analysis/source/app
+
+          asar extract             "$APP/Contents/Resources/app.asar"             analysis/source/app
+
+      - name: Locate main.js
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN="$(
+            find analysis/source/app               -type f               -name "main.js"               -print               | while IFS= read -r f; do
+                  if grep -q -E "BrowserWindow|findFlashPath|PepperFlashPlayer" "$f" 2>/dev/null; then
+                    echo "$f"
+                    break
+                  fi
+                done
+          )"
+
+          if [ -z "$MAIN" ]; then
+            echo "ERROR: main.js not found."
+            exit 1
+          fi
+
+          printf '%s\n' "$MAIN" > analysis/main.txt
+          cat analysis/main.txt
+
+      - name: Install runtime capture helper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p analysis/source/app/helper
+
+          printf '%s' 'J3VzZSBzdHJpY3QnOwoKY29uc3QgZnMgPSByZXF1aXJlKCdmcycpOwpjb25zdCBwYXRoID0gcmVxdWlyZSgncGF0aCcpOwoKY29uc3QgT1VUX0RJUiA9CiAgICBwcm9jZXNzLmVudi5HVU5OWV9DQVBUVVJFX0RJUiB8fAogICAgcGF0aC5qb2luKHByb2Nlc3MuY3dkKCksICdydW50aW1lLWNhcHR1cmUnKTsKCmZ1bmN0aW9uIGFwcGVuZEpzb25MaW5lKG5hbWUsIHZhbHVlKSB7CiAgICBmcy5ta2RpclN5bmMoT1VUX0RJUiwgeyByZWN1cnNpdmU6IHRydWUgfSk7CiAgICBmcy5hcHBlbmRGaWxlU3luYygKICAgICAgICBwYXRoLmpvaW4oT1VUX0RJUiwgbmFtZSksCiAgICAgICAgSlNPTi5zdHJpbmdpZnkodmFsdWUpICsgJ1xuJywKICAgICAgICAndXRmOCcKICAgICk7Cn0KCmZ1bmN0aW9uIHNhdmVKc29uKG5hbWUsIHZhbHVlKSB7CiAgICBmcy5ta2RpclN5bmMoT1VUX0RJUiwgeyByZWN1cnNpdmU6IHRydWUgfSk7CiAgICBmcy53cml0ZUZpbGVTeW5jKAogICAgICAgIHBhdGguam9pbihPVVRfRElSLCBuYW1lKSwKICAgICAgICBKU09OLnN0cmluZ2lmeSh2YWx1ZSwgbnVsbCwgMiksCiAgICAgICAgJ3V0ZjgnCiAgICApOwp9CgpmdW5jdGlvbiBpbnN0YWxsKGNvbnRlbnRzKSB7CiAgICBjb250ZW50cy5vbignZGlkLWZpbmlzaC1sb2FkJywgYXN5bmMgKCkgPT4gewogICAgICAgIGxldCB1cmwgPSAnJzsKCiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgdXJsID0gY29udGVudHMuZ2V0VVJMKCk7CiAgICAgICAgfSBjYXRjaCAoXykge30KCiAgICAgICAgY29uc29sZS5sb2coJ1tHdW5ueSBDYXB0dXJlXSBkaWQtZmluaXNoLWxvYWQ6JywgdXJsKTsKCiAgICAgICAgaWYgKCF1cmwuaW5jbHVkZXMoJ3ppbmcudm4nKSkgewogICAgICAgICAgICByZXR1cm47CiAgICAgICAgfQoKICAgICAgICBjb25zdCBzY3JpcHQgPSBgCihmdW5jdGlvbiAoKSB7CiAgICBjb25zdCBvdXQgPSB7CiAgICAgICAgY2FwdHVyZWRBdDogbmV3IERhdGUoKS50b0lTT1N0cmluZygpLAogICAgICAgIHVybDogbG9jYXRpb24uaHJlZiwKICAgICAgICB0aXRsZTogZG9jdW1lbnQudGl0bGUsCiAgICAgICAgZW1iZWRzOiBbXSwKICAgICAgICBvYmplY3RzOiBbXSwKICAgICAgICBwbHVnaW5zOiBbXSwKICAgICAgICBtaW1lVHlwZXM6IFtdLAogICAgICAgIGdsb2JhbHM6IHt9LAogICAgICAgIHJlZmVyZW5jZXM6IFtdCiAgICB9OwoKICAgIHRyeSB7CiAgICAgICAgZG9jdW1lbnQucXVlcnlTZWxlY3RvckFsbCgnZW1iZWQnKS5mb3JFYWNoKGZ1bmN0aW9uIChub2RlKSB7CiAgICAgICAgICAgIG91dC5lbWJlZHMucHVzaCh7CiAgICAgICAgICAgICAgICBvdXRlckhUTUw6IG5vZGUub3V0ZXJIVE1MLAogICAgICAgICAgICAgICAgc3JjOiBub2RlLnNyYyB8fCAnJywKICAgICAgICAgICAgICAgIHR5cGU6IG5vZGUudHlwZSB8fCAnJywKICAgICAgICAgICAgICAgIGlkOiBub2RlLmlkIHx8ICcnLAogICAgICAgICAgICAgICAgbmFtZTogbm9kZS5uYW1lIHx8ICcnCiAgICAgICAgICAgIH0pOwogICAgICAgIH0pOwogICAgfSBjYXRjaCAoXykge30KCiAgICB0cnkgewogICAgICAgIGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3JBbGwoJ29iamVjdCcpLmZvckVhY2goZnVuY3Rpb24gKG5vZGUpIHsKICAgICAgICAgICAgb3V0Lm9iamVjdHMucHVzaCh7CiAgICAgICAgICAgICAgICBvdXRlckhUTUw6IG5vZGUub3V0ZXJIVE1MLAogICAgICAgICAgICAgICAgZGF0YTogbm9kZS5kYXRhIHx8ICcnLAogICAgICAgICAgICAgICAgdHlwZTogbm9kZS50eXBlIHx8ICcnLAogICAgICAgICAgICAgICAgaWQ6IG5vZGUuaWQgfHwgJycsCiAgICAgICAgICAgICAgICBuYW1lOiBub2RlLm5hbWUgfHwgJycKICAgICAgICAgICAgfSk7CiAgICAgICAgfSk7CiAgICB9IGNhdGNoIChfKSB7fQoKICAgIHRyeSB7CiAgICAgICAgb3V0LnBsdWdpbnMgPSBBcnJheS5mcm9tKG5hdmlnYXRvci5wbHVnaW5zIHx8IFtdKS5tYXAoZnVuY3Rpb24gKHBsdWdpbikgewogICAgICAgICAgICByZXR1cm4gewogICAgICAgICAgICAgICAgbmFtZTogcGx1Z2luLm5hbWUgfHwgJycsCiAgICAgICAgICAgICAgICBmaWxlbmFtZTogcGx1Z2luLmZpbGVuYW1lIHx8ICcnLAogICAgICAgICAgICAgICAgZGVzY3JpcHRpb246IHBsdWdpbi5kZXNjcmlwdGlvbiB8fCAnJywKICAgICAgICAgICAgICAgIHZlcnNpb246IHBsdWdpbi52ZXJzaW9uIHx8ICcnCiAgICAgICAgICAgIH07CiAgICAgICAgfSk7CiAgICB9IGNhdGNoIChfKSB7fQoKICAgIHRyeSB7CiAgICAgICAgb3V0Lm1pbWVUeXBlcyA9IEFycmF5LmZyb20obmF2aWdhdG9yLm1pbWVUeXBlcyB8fCBbXSkubWFwKGZ1bmN0aW9uIChtaW1lKSB7CiAgICAgICAgICAgIHJldHVybiB7CiAgICAgICAgICAgICAgICB0eXBlOiBtaW1lLnR5cGUgfHwgJycsCiAgICAgICAgICAgICAgICBzdWZmaXhlczogbWltZS5zdWZmaXhlcyB8fCAnJywKICAgICAgICAgICAgICAgIGRlc2NyaXB0aW9uOiBtaW1lLmRlc2NyaXB0aW9uIHx8ICcnLAogICAgICAgICAgICAgICAgZW5hYmxlZFBsdWdpbjogbWltZS5lbmFibGVkUGx1Z2luCiAgICAgICAgICAgICAgICAgICAgPyB7CiAgICAgICAgICAgICAgICAgICAgICAgIG5hbWU6IG1pbWUuZW5hYmxlZFBsdWdpbi5uYW1lIHx8ICcnLAogICAgICAgICAgICAgICAgICAgICAgICBmaWxlbmFtZTogbWltZS5lbmFibGVkUGx1Z2luLmZpbGVuYW1lIHx8ICcnCiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIDogbnVsbAogICAgICAgICAgICB9OwogICAgICAgIH0pOwogICAgfSBjYXRjaCAoXykge30KCiAgICBbCiAgICAgICAgJ3NldEZsYXNoRm9jdXMnLAogICAgICAgICdmbGFzaFJlYWR5JywKICAgICAgICAnZmxhc2gtcmVhZHknLAogICAgICAgICdmbGFzaF9yZWFkeScsCiAgICAgICAgJ2ZsYXNoRm9jdXMnLAogICAgICAgICdGbGFzaEZvY3VzJywKICAgICAgICAnZ2FtZVJlYWR5JywKICAgICAgICAnZ2FtZS1yZWFkeScsCiAgICAgICAgJ0V4dGVybmFsSW50ZXJmYWNlJywKICAgICAgICAnZnNjb21tYW5kJwogICAgXS5mb3JFYWNoKGZ1bmN0aW9uIChuYW1lKSB7CiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgb3V0Lmdsb2JhbHNbbmFtZV0gPSB7CiAgICAgICAgICAgICAgICBleGlzdHM6IHR5cGVvZiB3aW5kb3dbbmFtZV0gIT09ICd1bmRlZmluZWQnLAogICAgICAgICAgICAgICAgdHlwZTogdHlwZW9mIHdpbmRvd1tuYW1lXQogICAgICAgICAgICB9OwogICAgICAgIH0gY2F0Y2ggKGVycm9yKSB7CiAgICAgICAgICAgIG91dC5nbG9iYWxzW25hbWVdID0geyBlcnJvcjogU3RyaW5nKGVycm9yKSB9OwogICAgICAgIH0KICAgIH0pOwoKICAgIHRyeSB7CiAgICAgICAgY29uc3QgaHRtbCA9IGRvY3VtZW50LmRvY3VtZW50RWxlbWVudAogICAgICAgICAgICA/IGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5vdXRlckhUTUwKICAgICAgICAgICAgOiAnJzsKCiAgICAgICAgb3V0LnJlZmVyZW5jZXMgPQogICAgICAgICAgICBodG1sLm1hdGNoKAogICAgICAgICAgICAgICAgL3NldEZsYXNoRm9jdXN8Zmxhc2hSZWFkeXxGbGFzaEZvY3VzfExvYWRpbmdcLnN3ZnxTaG9ja3dhdmV8YXBwbGljYXRpb25cL3gtc2hvY2t3YXZlLWZsYXNoL2dpCiAgICAgICAgICAgICkgfHwgW107CiAgICB9IGNhdGNoIChfKSB7fQoKICAgIHJldHVybiBvdXQ7Cn0pKCk7CmA7CgogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGNvbnN0IHJlc3VsdCA9IGF3YWl0IGNvbnRlbnRzLmV4ZWN1dGVKYXZhU2NyaXB0KAogICAgICAgICAgICAgICAgc2NyaXB0LAogICAgICAgICAgICAgICAgdHJ1ZQogICAgICAgICAgICApOwoKICAgICAgICAgICAgc2F2ZUpzb24oCiAgICAgICAgICAgICAgICAncGFnZS1jYXB0dXJlLScgKyBEYXRlLm5vdygpICsgJy5qc29uJywKICAgICAgICAgICAgICAgIHJlc3VsdAogICAgICAgICAgICApOwoKICAgICAgICAgICAgY29uc29sZS5sb2coJ1tHdW5ueSBDYXB0dXJlXSBwYWdlIGNhcHR1cmUgc2F2ZWQnKTsKICAgICAgICB9IGNhdGNoIChlcnJvcikgewogICAgICAgICAgICBjb25zb2xlLmVycm9yKAogICAgICAgICAgICAgICAgJ1tHdW5ueSBDYXB0dXJlXSBwYWdlIGNhcHR1cmUgZmFpbGVkOicsCiAgICAgICAgICAgICAgICBlcnJvcgogICAgICAgICAgICApOwogICAgICAgIH0KICAgIH0pOwoKICAgIGNvbnRlbnRzLm9uKAogICAgICAgICdjb25zb2xlLW1lc3NhZ2UnLAogICAgICAgICgKICAgICAgICAgICAgZXZlbnQsCiAgICAgICAgICAgIGxldmVsLAogICAgICAgICAgICBtZXNzYWdlLAogICAgICAgICAgICBsaW5lLAogICAgICAgICAgICBzb3VyY2VJZAogICAgICAgICkgPT4gewogICAgICAgICAgICBhcHBlbmRKc29uTGluZSgKICAgICAgICAgICAgICAgICdjb25zb2xlLm5kanNvbicsCiAgICAgICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAgICAgdGltZTogbmV3IERhdGUoKS50b0lTT1N0cmluZygpLAogICAgICAgICAgICAgICAgICAgIGxldmVsLAogICAgICAgICAgICAgICAgICAgIG1lc3NhZ2UsCiAgICAgICAgICAgICAgICAgICAgbGluZSwKICAgICAgICAgICAgICAgICAgICBzb3VyY2VJZAogICAgICAgICAgICAgICAgfQogICAgICAgICAgICApOwoKICAgICAgICAgICAgY29uc29sZS5sb2coJ1tHdW5ueSBQYWdlXScsIG1lc3NhZ2UpOwogICAgICAgIH0KICAgICk7CgogICAgY29udGVudHMub24oCiAgICAgICAgJ2RpZC1uYXZpZ2F0ZScsCiAgICAgICAgKGV2ZW50LCB1cmwpID0+IHsKICAgICAgICAgICAgYXBwZW5kSnNvbkxpbmUoCiAgICAgICAgICAgICAgICAnbmF2aWdhdGlvbi5uZGpzb24nLAogICAgICAgICAgICAgICAgewogICAgICAgICAgICAgICAgICAgIHRpbWU6IG5ldyBEYXRlKCkudG9JU09TdHJpbmcoKSwKICAgICAgICAgICAgICAgICAgICB0eXBlOiAnZGlkLW5hdmlnYXRlJywKICAgICAgICAgICAgICAgICAgICB1cmwKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgKTsKICAgICAgICB9CiAgICApOwp9Cgptb2R1bGUuZXhwb3J0cyA9IHsgaW5zdGFsbCB9Owo='             | base64 --decode             > analysis/source/app/helper/runtime-capture.js
+
+          node             --check             analysis/source/app/helper/runtime-capture.js
+
+      - name: Patch main.js for runtime capture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN="$(cat analysis/main.txt)"
+          export MAIN
+
+          printf '%s' 'aW1wb3J0IG9zCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKbWFpbiA9IFBhdGgob3MuZW52aXJvblsiTUFJTiJdKQpzb3VyY2UgPSBtYWluLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgtc2lnIikKCm1hcmtlciA9ICJjb25zdCBwYXRoID0gcmVxdWlyZSgncGF0aCcpOyIKCmlmIG1hcmtlciBub3QgaW4gc291cmNlOgogICAgcmFpc2UgU3lzdGVtRXhpdCgKICAgICAgICAiRVJST1I6IHBhdGggcmVxdWlyZSBtYXJrZXIgbm90IGZvdW5kIgogICAgKQoKaWYgInJ1bnRpbWUtY2FwdHVyZS5qcyIgbm90IGluIHNvdXJjZToKICAgIGluamVjdGlvbiA9IHInJycKdHJ5IHsKICAgIGNvbnN0IHJ1bnRpbWVDYXB0dXJlID0KICAgICAgICByZXF1aXJlKAogICAgICAgICAgICBwYXRoLmpvaW4oCiAgICAgICAgICAgICAgICBfX2Rpcm5hbWUsCiAgICAgICAgICAgICAgICAnaGVscGVyJywKICAgICAgICAgICAgICAgICdydW50aW1lLWNhcHR1cmUuanMnCiAgICAgICAgICAgICkKICAgICAgICApOwoKICAgIGFwcC5vbigKICAgICAgICAnd2ViLWNvbnRlbnRzLWNyZWF0ZWQnLAogICAgICAgIGZ1bmN0aW9uICgKICAgICAgICAgICAgZXZlbnQsCiAgICAgICAgICAgIGNvbnRlbnRzCiAgICAgICAgKSB7CiAgICAgICAgICAgIHJ1bnRpbWVDYXB0dXJlLmluc3RhbGwoCiAgICAgICAgICAgICAgICBjb250ZW50cwogICAgICAgICAgICApOwogICAgICAgIH0KICAgICk7CgogICAgY29uc29sZS5sb2coCiAgICAgICAgJ1tHdW5ueSBDYXB0dXJlXSBjYXB0dXJlIGluc3RhbGxlZCcKICAgICk7Cgp9IGNhdGNoIChlcnJvcikgewogICAgY29uc29sZS5lcnJvcigKICAgICAgICAnW0d1bm55IENhcHR1cmVdIGluc3RhbGwgZmFpbGVkOicsCiAgICAgICAgZXJyb3IKICAgICk7Cn0KJycnCiAgICBzb3VyY2UgPSBzb3VyY2UucmVwbGFjZSgKICAgICAgICBtYXJrZXIsCiAgICAgICAgbWFya2VyICsgaW5qZWN0aW9uLAogICAgICAgIDEKICAgICkKCm1haW4ud3JpdGVfdGV4dChzb3VyY2UsIGVuY29kaW5nPSJ1dGYtOCIpCnByaW50KCJSdW50aW1lIGNhcHR1cmUgaG9vayBpbnNlcnRlZC4iKQo='             | base64 --decode             | python3
+
+          node             --check             "$MAIN"
+
+      - name: Rebuild app.asar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(cat analysis/original/app.txt)"
+          ASAR="$APP/Contents/Resources/app.asar"
+
+          rm -f "$ASAR"
+
+          asar pack             analysis/source/app             "$ASAR"
+
+          echo "Patched app.asar rebuilt."
+
+      - name: Launch original Gunny and capture runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(cat analysis/original/app.txt)"
+          BIN="$APP/Contents/MacOS/Gunny PC"
+          LOG="runtime-capture/gunny-runtime.log"
+
+          export GUNNY_CAPTURE_DIR="$(pwd)/runtime-capture"
+
+          rm -f "$LOG"
+
+          "$BIN"             --enable-logging=stderr             --v=1             > "$LOG"             2>&1 &
+
+          PID=$!
+
+          printf '%s\n' "$PID"             > runtime-capture/pid.txt
+
+          echo "Gunny PID: $PID"
+          echo "Waiting 40 seconds for the runtime page..."
+          sleep 40
+
+      - name: Collect runtime evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PID="$(cat runtime-capture/pid.txt 2>/dev/null || true)"
+
+          if [ -n "$PID" ]; then
+            kill "$PID" 2>/dev/null || true
+          fi
+
+          LOG="runtime-capture/gunny-runtime.log"
+
+          echo "=========================================="
+          echo "FLASH / PLUGIN / JS ERRORS"
+          echo "=========================================="
+
+          grep -niE             "pepper|ppapi|plugin|flash|Shockwave|Loading\.swf|setFlashFocus|ExternalInterface|ReferenceError|TypeError|SyntaxError"             "$LOG"             | tail -1200             || true
+
+          echo
+          echo "=========================================="
+          echo "CAPTURE FILES"
+          echo "=========================================="
+
+          find runtime-capture             -maxdepth 2             -type f             -print             | sort
+
+      - name: Package analysis
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp -R             runtime-capture             analysis/results/runtime-capture
+
+          cp             analysis/main.txt             analysis/results/main.txt
+
+          cp             analysis/original/app.txt             analysis/results/original-app.txt
+
+          cd analysis
+
+          zip             -qr             ../gunny-runtime-flash-capture.zip             results
+
+          cd ..
+
+          ls -lh             gunny-runtime-flash-capture.zip
+
+      - name: Upload runtime analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-Runtime-Flash-Capture
+          path: gunny-runtime-flash-capture.zip
+          if-no-files-found: error
+          retention-days: 14
