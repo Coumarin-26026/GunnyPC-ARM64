@@ -1,0 +1,384 @@
+name: Build Gunny PC ARM64 Ruffle HostBridge
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
+env:
+  APP_NAME: Gunny PC
+  ELECTRON_VERSION: 43.2.0
+  RUFFLE_VERSION: 0.4.1
+  GUNNY_URL: https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b
+jobs:
+  build:
+    name: Build ARM64
+    runs-on: macos-14
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Install tools
+      shell: bash
+      run: 'set -euo pipefail
+
+        npm install --global @electron/asar
+
+        node --version
+
+        asar --version'
+    - name: Download and extract Gunny Intel
+      shell: bash
+      run: "set -euo pipefail\nrm -rf build release\nmkdir -p build/original release\n\
+        curl --fail --location --retry 10 --retry-delay 5 \\\n  --connect-timeout\
+        \ 30 --max-time 1800 -A \"Mozilla/5.0\" \\\n  \"$GUNNY_URL\" -o build/gunny-intel.zip\n\
+        unzip -q -o build/gunny-intel.zip -d build/original\nrm -rf build/original/__MACOSX\n\
+        APP=\"$(find build/original -type d -name \"*.app\" -print | head -n 1)\"\n\
+        [ -n \"$APP\" ] || { echo \"ERROR: Gunny app not found.\"; exit 1; }\nprintf\
+        \ '%s\\n' \"$APP\" > build/original-app.txt\nasar extract \"$APP/Contents/Resources/app.asar\"\
+        \ build/source"
+    - name: Auto-detect Gunny entrypoints
+      shell: bash
+      run: "\nset -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ json\nimport re\n\nroot = Path(\"build/source\").resolve()\nreport = {\n\
+        \    \"main_candidates\": [],\n    \"preload_candidates\": [],\n    \"browser_windows\"\
+        : [],\n    \"selected_main\": None,\n    \"selected_preload\": None,\n}\n\n\
+        def read_text(path):\n    try:\n        return path.read_text(encoding=\"\
+        utf-8-sig\", errors=\"ignore\")\n    except Exception:\n        return \"\"\
+        \n\ndef score_main(path, text):\n    terms = {\n        \"BrowserWindow\"\
+        : 20,\n        \"PepperFlashPlayer\": 30,\n        \"findFlashPath\": 30,\n\
+        \        \"ppapi-flash-path\": 30,\n        \"ppapi-flash-version\": 20,\n\
+        \        \"app.whenReady\": 10,\n        \"ipcMain\": 8,\n        \"session\"\
+        : 5,\n    }\n    score = 0\n    hits = []\n    low = text.lower()\n    for\
+        \ term, weight in terms.items():\n        if term.lower() in low:\n      \
+        \      score += weight\n            hits.append(term)\n    return score, hits\n\
+        \ndef balanced_block(text, start):\n    brace = text.find(\"{\", start)\n\
+        \    if brace < 0:\n        return None\n\n    depth = 0\n    quote = None\n\
+        \    escape = False\n\n    for i in range(brace, len(text)):\n        c =\
+        \ text[i]\n\n        if quote:\n            if escape:\n                escape\
+        \ = False\n            elif c == \"\\\\\":\n                escape = True\n\
+        \            elif c == quote:\n                quote = None\n            continue\n\
+        \n        if c in (\"'\", '\"', \"`\"):\n            quote = c\n         \
+        \   continue\n\n        if c == \"{\":\n            depth += 1\n        elif\
+        \ c == \"}\":\n            depth -= 1\n            if depth == 0:\n      \
+        \          return text[start:i + 1]\n\n    return None\n\n# ----------------------------\n\
+        # Find main.js automatically.\n# ----------------------------\nfor file in\
+        \ sorted(root.rglob(\"main.js\")):\n    text = read_text(file)\n    if not\
+        \ text:\n        continue\n\n    score, hits = score_main(file, text)\n\n\
+        \    if score > 0:\n        report[\"main_candidates\"].append({\n       \
+        \     \"path\": str(file),\n            \"score\": score,\n            \"\
+        hits\": hits,\n        })\n\nif not report[\"main_candidates\"]:\n    # Second\
+        \ pass: allow another JS file to be used as Electron entrypoint.\n    for\
+        \ file in sorted(root.rglob(\"*.js\")):\n        text = read_text(file)\n\
+        \        if not text:\n            continue\n\n        score, hits = score_main(file,\
+        \ text)\n\n        if score >= 30:\n            report[\"main_candidates\"\
+        ].append({\n                \"path\": str(file),\n                \"score\"\
+        : score,\n                \"hits\": hits,\n            })\n\nif not report[\"\
+        main_candidates\"]:\n    raise SystemExit(\n        \"AUTO-DETECT FAILED:\
+        \ no Electron main/entry JS candidate found.\"\n    )\n\nreport[\"main_candidates\"\
+        ].sort(\n    key=lambda x: (-x[\"score\"], x[\"path\"])\n)\n\nmain = Path(\n\
+        \    report[\"main_candidates\"][0][\"path\"]\n)\n\nmain_text = read_text(main)\n\
+        report[\"selected_main\"] = str(main)\n\n# ----------------------------\n\
+        # Analyze every BrowserWindow.\n# ----------------------------\nbrowser_re\
+        \ = re.compile(\n    r\"\\bnew\\s+(?:[\\w$.]+\\.)?BrowserWindow\\s*\\(\",\n\
+        \    re.I\n)\n\nfor index, match in enumerate(\n    browser_re.finditer(main_text),\n\
+        \    1\n):\n    block = balanced_block(\n        main_text,\n        match.start()\n\
+        \    )\n\n    if not block:\n        continue\n\n    context = main_text[\n\
+        \        max(0, match.start() - 2500):\n        min(len(main_text), match.start()\
+        \ + len(block) + 4000)\n    ]\n\n    low = (block + \"\\n\" + context).lower()\n\
+        \n    score = 0\n    hits = []\n\n    positive = {\n        \"pepperflashplayer\"\
+        : 40,\n        \"findflashpath\": 40,\n        \"ppapi-flash-path\": 40,\n\
+        \        \"ppapi-flash-version\": 30,\n        \"application/x-shockwave-flash\"\
+        : 35,\n        \".swf\": 20,\n        \"plugins: true\": 20,\n        \"plugins:true\"\
+        : 20,\n        \"webpreferences\": 10,\n        \"preload\": 15,\n       \
+        \ \"loadurl\": 12,\n        \"loadfile\": 10,\n        \"gn.zing.vn\": 20,\n\
+        \        \"flash\": 20,\n        \"game\": 8,\n        \"session\": 5,\n \
+        \   }\n\n    negative = {\n        \"preload-dialog\": -25,\n        \"preload-bottom-bar\"\
+        : -25,\n        \"preload-title-bar\": -25,\n        \"dialog\": -15,\n  \
+        \      \"bottom-bar\": -15,\n        \"title-bar\": -15,\n        \"devtools\"\
+        : -20,\n        \"settings\": -10,\n    }\n\n    for term, weight in positive.items():\n\
+        \        if term in low:\n            score += weight\n            hits.append(\"\
+        +\" + term)\n\n    for term, weight in negative.items():\n        if term\
+        \ in low:\n            score += weight\n            hits.append(str(weight)\
+        \ + \":\" + term)\n\n    report[\"browser_windows\"].append({\n        \"\
+        index\": index,\n        \"score\": score,\n        \"hits\": hits,\n    \
+        \    \"source_excerpt\": block[:12000],\n    })\n\n# ----------------------------\n\
+        # Preload candidates.\n# ----------------------------\nfiles_by_name = {}\n\
+        for file in root.rglob(\"*.js\"):\n    files_by_name.setdefault(\n       \
+        \ file.name,\n        []\n    ).append(file)\n\n# First, files whose names\
+        \ contain \"preload\".\npreload_named = [\n    f for f in root.rglob(\"*.js\"\
+        )\n    if \"preload\" in f.name.lower()\n]\n\n# Also use quoted JS names in\
+        \ BrowserWindow blocks.\nname_matches = []\n\nfor item in report[\"browser_windows\"\
+        ]:\n    for name in re.findall(\n        r\"\"\"['\"]([^'\"]+\\.js)['\"]\"\
+        \"\",\n        item[\"source_excerpt\"],\n        flags=re.I\n    ):\n   \
+        \     name_matches.append(\n            Path(name).name\n        )\n\nresolved\
+        \ = []\n\nfor name in name_matches:\n    for file in files_by_name.get(name,\
+        \ []):\n        if file not in resolved:\n            resolved.append(file)\n\
+        \ncandidate_pool = resolved or preload_named\n\n# Last-resort source scoring.\n\
+        if not candidate_pool:\n    for file in root.rglob(\"*.js\"):\n        if\
+        \ file == main:\n            continue\n\n        text = read_text(file)\n\
+        \        low = text.lower()\n        score = 0\n\n        if \"preload\" in\
+        \ file.name.lower():\n            score += 100\n\n        for term in (\n\
+        \            \"contextbridge\",\n            \"ipcrenderer\",\n          \
+        \  \"webframe\",\n            \"electronapi\",\n            \"setflashfocus\"\
+        ,\n            \"flash-ready\",\n            \"webcontents\",\n        ):\n\
+        \            if term in low:\n                score += 8\n\n        if score\
+        \ > 0:\n            candidate_pool.append(file)\n\n# Final fallback: do not\
+        \ fail the entire build.\n# Preserve a real Gunny JS file so the build can\
+        \ continue, but record it.\nif not candidate_pool:\n    all_js = [\n     \
+        \   f for f in root.rglob(\"*.js\")\n        if f != main\n    ]\n\n    if\
+        \ all_js:\n        candidate_pool = [sorted(all_js)[0]]\n    else:\n     \
+        \   candidate_pool = [main]\n\ndef preload_score(file):\n    name = file.name.lower()\n\
+        \    text = read_text(file).lower()\n\n    score = 0\n\n    if \"preload\"\
+        \ in name:\n        score += 100\n    if \"game\" in name:\n        score\
+        \ += 40\n    if \"flash\" in text:\n        score += 15\n    if \"contextbridge\"\
+        \ in text:\n        score += 10\n    if \"ipcrenderer\" in text:\n       \
+        \ score += 10\n    if \"webframe\" in text:\n        score += 5\n\n    if\
+        \ \"dialog\" in name:\n        score -= 100\n    if \"bottom-bar\" in name:\n\
+        \        score -= 100\n    if \"title-bar\" in name:\n        score -= 100\n\
+        \n    return (-score, str(file))\n\ncandidate_pool = sorted(\n    set(candidate_pool),\n\
+        \    key=preload_score\n)\n\npreload = candidate_pool[0]\n\nreport[\"selected_preload\"\
+        ] = str(preload)\n\n# Write artifacts for diagnostics; never stop the build\
+        \ just because\n# automatic classification is uncertain.\nPath(\n    \"build/autodetect-report.json\"\
+        \n).write_text(\n    json.dumps(\n        report,\n        indent=2,\n   \
+        \     ensure_ascii=False\n    ),\n    encoding=\"utf-8\"\n)\n\nPath(\n   \
+        \ \"build/main-path.txt\"\n).write_text(\n    str(main) + \"\\n\",\n    encoding=\"\
+        utf-8\"\n)\n\nPath(\n    \"build/preload-relative.txt\"\n).write_text(\n \
+        \   preload.relative_to(root).as_posix() + \"\\n\",\n    encoding=\"utf-8\"\
+        \n)\n\nprint(\"AUTO-DETECT RESULT\")\nprint(\"==================\")\nprint(\"\
+        MAIN:\", main)\nprint(\"PRELOAD:\", preload.relative_to(root))\nprint()\n\
+        print(\"BrowserWindow candidates:\")\nfor item in report[\"browser_windows\"\
+        ]:\n    print(\n        f\"  #{item['index']} score={item['score']} \"\n \
+        \       f\"hits={','.join(item['hits'][:20])}\"\n    )\n\nprint()\nprint(\"\
+        Preload candidates:\")\nfor file in candidate_pool[:50]:\n    print(\" \"\
+        , file.relative_to(root))\n\nprint()\nprint(\"Automatic detection completed.\"\
+        )\nPY\n\necho\necho \"MAIN:\"\ncat build/main-path.txt\n\necho\necho \"PRELOAD:\"\
+        \ncat build/preload-relative.txt\n\necho\necho \"AUTODETECT REPORT:\"\nls\
+        \ -lh build/autodetect-report.json\n"
+    - name: Create Gunny host bridge
+      shell: bash
+      run: 'set -euo pipefail
+
+        mkdir -p build/bridge
+
+        echo KCgpID0+IHsKICAgICJ1c2Ugc3RyaWN0IjsKCiAgICAvKgogICAgICogR3VubnkgUnVmZmxlIEhvc3QgQnJpZGdlCiAgICAgKgogICAgICogRGVyaXZlZCBmcm9tIHRoZSBhY3R1YWwgR3VubnkgSW50ZWwgTG9hZGluZy5zd2YgY29udHJhY3Q6CiAgICAgKgogICAgICogICBmc2NvbW1hbmQ6CiAgICAgKiAgICAgc2V0VmVyc2lvbgogICAgICogICAgIGNoZWNrUmVzb3VyY2UKICAgICAqICAgICBkZWxldGVSZXNvdXJjZQogICAgICogICAgIHByaW50VGVzdAogICAgICogICAgIGFsZXJ0QW5kUmVzdGFydAogICAgICogICAgIHNldERhaWx5VGFzawogICAgICogICAgIHNldERhaWx5QWN0aXZpdHkKICAgICAqICAgICBzZXRGYXRpZ3VlCiAgICAgKiAgICAgc2V0U291bmQKICAgICAqCiAgICAgKiAgIEV4dGVybmFsSW50ZXJmYWNlLmFkZENhbGxiYWNrOgogICAgICogICAgIHNldExvZ2luVHlwZQogICAgICogICAgIGNoZWNrQ29tcGxldGUKICAgICAqICAgICBkZWxldGVDb21wbGV0ZQogICAgICogICAgIGZsYXNoR290b0FuZFBsYXkKICAgICAqICAgICBzZXRTb3VuZAogICAgICogICAgIFNldElzRGVza3RvcAogICAgICogICAgIGxhbmRlcnNBd2FyZAogICAgICoKICAgICAqIFRoZSBtb3N0IGltcG9ydGFudCBjb250cmFjdCBpczoKICAgICAqCiAgICAgKiAgIGNoZWNrUmVzb3VyY2UoaWQsIGF8YnxjfGQpCiAgICAgKiAgICAgICAtPgogICAgICogICBjaGVja0NvbXBsZXRlKGlkLCAiZmFsc2UiLCBjLCBkKQogICAgICoKICAgICAqIFJldHVybmluZyAiZmFsc2UiIGRlbGliZXJhdGVseSBieXBhc3NlcyB0aGUgb2xkIEludGVsCiAgICAgKiByZXNvdXJjZSBjYWNoZSBhbmQgbGV0cyBHdW5ueSdzIG5vcm1hbCBVUkwgbG9hZGVyIGZldGNoCiAgICAgKiB0aGUgb3JpZ2luYWwgcmVzb3VyY2UuCiAgICAgKi8KCiAgICBpZiAod2luZG93Ll9fR1VOTllfUlVGRkxFX0hPU1RfQlJJREdFX18pIHsKICAgICAgICByZXR1cm47CiAgICB9CgogICAgd2luZG93Ll9fR1VOTllfUlVGRkxFX0hPU1RfQlJJREdFX18gPSB0cnVlOwoKICAgIGNvbnN0IHN0YXRlID0gewogICAgICAgIGZsYXNoVmVyc2lvbjogIiIsCiAgICAgICAgcGxheWVyczogbmV3IFNldCgpLAogICAgICAgIHJlYWR5OiBmYWxzZQogICAgfTsKCiAgICBmdW5jdGlvbiBsb2coLi4uYXJncykgewogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGNvbnNvbGUubG9nKAogICAgICAgICAgICAgICAgIltHdW5ueSBSdWZmbGUgSG9zdF0iLAogICAgICAgICAgICAgICAgLi4uYXJncwogICAgICAgICAgICApOwogICAgICAgIH0gY2F0Y2ggKF8pIHt9CiAgICB9CgogICAgZnVuY3Rpb24gd2FybiguLi5hcmdzKSB7CiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgY29uc29sZS53YXJuKAogICAgICAgICAgICAgICAgIltHdW5ueSBSdWZmbGUgSG9zdF0iLAogICAgICAgICAgICAgICAgLi4uYXJncwogICAgICAgICAgICApOwogICAgICAgIH0gY2F0Y2ggKF8pIHt9CiAgICB9CgogICAgZnVuY3Rpb24gZ2V0UnVmZmxlQXBpKCkgewogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGlmICgKICAgICAgICAgICAgICAgIHdpbmRvdy5SdWZmbGVQbGF5ZXIgJiYKICAgICAgICAgICAgICAgIHR5cGVvZiB3aW5kb3cuUnVmZmxlUGxheWVyLm5ld2VzdCA9PT0gImZ1bmN0aW9uIgogICAgICAgICAgICApIHsKICAgICAgICAgICAgICAgIHJldHVybiB3aW5kb3cuUnVmZmxlUGxheWVyLm5ld2VzdCgpOwogICAgICAgICAgICB9CiAgICAgICAgfSBjYXRjaCAoXykge30KCiAgICAgICAgcmV0dXJuIG51bGw7CiAgICB9CgogICAgZnVuY3Rpb24gZ2V0VmVyc2lvbmVkQXBpKHBsYXllcikgewogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGlmICgKICAgICAgICAgICAgICAgIHBsYXllciAmJgogICAgICAgICAgICAgICAgdHlwZW9mIHBsYXllci5ydWZmbGUgPT09ICJmdW5jdGlvbiIKICAgICAgICAgICAgKSB7CiAgICAgICAgICAgICAgICByZXR1cm4gcGxheWVyLnJ1ZmZsZSgpOwogICAgICAgICAgICB9CiAgICAgICAgfSBjYXRjaCAoXykge30KCiAgICAgICAgcmV0dXJuIG51bGw7CiAgICB9CgogICAgZnVuY3Rpb24gY2FsbEV4dGVybmFsSW50ZXJmYWNlKAogICAgICAgIHBsYXllciwKICAgICAgICBuYW1lLAogICAgICAgIC4uLmFyZ3MKICAgICkgewogICAgICAgIGlmICghcGxheWVyKSB7CiAgICAgICAgICAgIHJldHVybiB1bmRlZmluZWQ7CiAgICAgICAgfQoKICAgICAgICBjb25zdCBhcGkgPSBnZXRWZXJzaW9uZWRBcGkocGxheWVyKTsKCiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgaWYgKAogICAgICAgICAgICAgICAgYXBpICYmCiAgICAgICAgICAgICAgICB0eXBlb2YgYXBpLmNhbGxFeHRlcm5hbEludGVyZmFjZSA9PT0gImZ1bmN0aW9uIgogICAgICAgICAgICApIHsKICAgICAgICAgICAgICAgIHJldHVybiBhcGkuY2FsbEV4dGVybmFsSW50ZXJmYWNlKAogICAgICAgICAgICAgICAgICAgIG5hbWUsCiAgICAgICAgICAgICAgICAgICAgLi4uYXJncwogICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgfQogICAgICAgIH0gY2F0Y2ggKGVycm9yKSB7CiAgICAgICAgICAgIHdhcm4oCiAgICAgICAgICAgICAgICAiY2FsbEV4dGVybmFsSW50ZXJmYWNlIGZhaWxlZDoiLAogICAgICAgICAgICAgICAgbmFtZSwKICAgICAgICAgICAgICAgIGVycm9yCiAgICAgICAgICAgICk7CiAgICAgICAgfQoKICAgICAgICB0cnkgewogICAgICAgICAgICBpZiAoCiAgICAgICAgICAgICAgICB0eXBlb2YgcGxheWVyLmNhbGxFeHRlcm5hbEludGVyZmFjZSA9PT0gImZ1bmN0aW9uIgogICAgICAgICAgICApIHsKICAgICAgICAgICAgICAgIHJldHVybiBwbGF5ZXIuY2FsbEV4dGVybmFsSW50ZXJmYWNlKAogICAgICAgICAgICAgICAgICAgIG5hbWUsCiAgICAgICAgICAgICAgICAgICAgLi4uYXJncwogICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgfQogICAgICAgIH0gY2F0Y2ggKGVycm9yKSB7CiAgICAgICAgICAgIHdhcm4oCiAgICAgICAgICAgICAgICAibGVnYWN5IGNhbGxFeHRlcm5hbEludGVyZmFjZSBmYWlsZWQ6IiwKICAgICAgICAgICAgICAgIG5hbWUsCiAgICAgICAgICAgICAgICBlcnJvcgogICAgICAgICAgICApOwogICAgICAgIH0KCiAgICAgICAgcmV0dXJuIHVuZGVmaW5lZDsKICAgIH0KCiAgICBmdW5jdGlvbiBhZGRGc0NvbW1hbmRIYW5kbGVyKHBsYXllcikgewogICAgICAgIGlmICghcGxheWVyKSB7CiAgICAgICAgICAgIHJldHVybjsKICAgICAgICB9CgogICAgICAgIGlmICgKICAgICAgICAgICAgc3RhdGUucGxheWVycy5oYXMocGxheWVyKQogICAgICAgICkgewogICAgICAgICAgICByZXR1cm47CiAgICAgICAgfQoKICAgICAgICBzdGF0ZS5wbGF5ZXJzLmFkZChwbGF5ZXIpOwoKICAgICAgICBjb25zdCBoYW5kbGVyID0KICAgICAgICAgICAgKGNvbW1hbmQsIGFyZ3MpID0+IHsKICAgICAgICAgICAgICAgIGhhbmRsZUZzQ29tbWFuZCgKICAgICAgICAgICAgICAgICAgICBwbGF5ZXIsCiAgICAgICAgICAgICAgICAgICAgU3RyaW5nKGNvbW1hbmQgfHwgIiIpLAogICAgICAgICAgICAgICAgICAgIFN0cmluZyhhcmdzIHx8ICIiKQogICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgfTsKCiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgaWYgKAogICAgICAgICAgICAgICAgdHlwZW9mIHBsYXllci5vbkZTQ29tbWFuZCAhPT0KICAgICAgICAgICAgICAgICJ1bmRlZmluZWQiCiAgICAgICAgICAgICkgewogICAgICAgICAgICAgICAgcGxheWVyLm9uRlNDb21tYW5kID0KICAgICAgICAgICAgICAgICAgICBoYW5kbGVyOwogICAgICAgICAgICB9CiAgICAgICAgfSBjYXRjaCAoXykge30KCiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgY29uc3QgYXBpID0KICAgICAgICAgICAgICAgIGdldFZlcnNpb25lZEFwaShwbGF5ZXIpOwoKICAgICAgICAgICAgaWYgKAogICAgICAgICAgICAgICAgYXBpICYmCiAgICAgICAgICAgICAgICB0eXBlb2YgYXBpLmFkZEZTQ29tbWFuZEhhbmRsZXIgPT09CiAgICAgICAgICAgICAgICAiZnVuY3Rpb24iCiAgICAgICAgICAgICkgewogICAgICAgICAgICAgICAgYXBpLmFkZEZTQ29tbWFuZEhhbmRsZXIoCiAgICAgICAgICAgICAgICAgICAgaGFuZGxlcgogICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgfQogICAgICAgIH0gY2F0Y2ggKF8pIHt9CgogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGlmICgKICAgICAgICAgICAgICAgIHR5cGVvZiBwbGF5ZXIuYWRkRlNDb21tYW5kSGFuZGxlciA9PT0KICAgICAgICAgICAgICAgICJmdW5jdGlvbiIKICAgICAgICAgICAgKSB7CiAgICAgICAgICAgICAgICBwbGF5ZXIuYWRkRlNDb21tYW5kSGFuZGxlcigKICAgICAgICAgICAgICAgICAgICBoYW5kbGVyCiAgICAgICAgICAgICAgICApOwogICAgICAgICAgICB9CiAgICAgICAgfSBjYXRjaCAoXykge30KCiAgICAgICAgbG9nKAogICAgICAgICAgICAiQXR0YWNoZWQgRlNDb21tYW5kIGJyaWRnZSB0byBSdWZmbGUgcGxheWVyLiIKICAgICAgICApOwogICAgfQoKICAgIGZ1bmN0aW9uIGNvbXBsZXRlQ2hlY2soCiAgICAgICAgcGxheWVyLAogICAgICAgIGlkLAogICAgICAgIG9yaWdpbmFsUGFydHMKICAgICkgewogICAgICAgIGNvbnN0IHBhcnRzID0KICAgICAgICAgICAgb3JpZ2luYWxQYXJ0cyB8fCBbXTsKCiAgICAgICAgY29uc3QgcGFyYW0zID0KICAgICAgICAgICAgcGFydHMubGVuZ3RoID49IDMKICAgICAgICAgICAgICAgID8gcGFydHNbMl0KICAgICAgICAgICAgICAgIDogIiI7CgogICAgICAgIGNvbnN0IHBhcmFtNCA9CiAgICAgICAgICAgIHBhcnRzLmxlbmd0aCA+PSA0CiAgICAgICAgICAgICAgICA/IHBhcnRzWzNdCiAgICAgICAgICAgICAgICA6ICJmYWxzZSI7CgogICAgICAgIC8qCiAgICAgICAgICogSW1wb3J0YW50OgogICAgICAgICAqCiAgICAgICAgICogR3VubnkncyBMb2FkUmVzb3VyY2VNYW5hZ2VyLmNoZWNrQ29tcGxldGUoKQogICAgICAgICAqIHVzZXMgdGhlIHNlY29uZCBhcmd1bWVudCBvbmx5IGFzIGEgYm9vbGVhbiBmbGFnLgogICAgICAgICAqCiAgICAgICAgICogImZhbHNlIiBtYWtlcyBpdCByZXN0b3JlIHRoZSBvcmlnaW5hbCBVUkwgYW5kCiAgICAgICAgICogY2FsbCBiZWdpbkxvYWQoKSwgYnlwYXNzaW5nIHRoZSBvbGQgSW50ZWwgY2FjaGUuCiAgICAgICAgICovCgogICAgICAgIHNldFRpbWVvdXQoKCkgPT4gewogICAgICAgICAgICBjb25zdCByZXN1bHQgPQogICAgICAgICAgICAgICAgY2FsbEV4dGVybmFsSW50ZXJmYWNlKAogICAgICAgICAgICAgICAgICAgIHBsYXllciwKICAgICAgICAgICAgICAgICAgICAiY2hlY2tDb21wbGV0ZSIsCiAgICAgICAgICAgICAgICAgICAgU3RyaW5nKGlkKSwKICAgICAgICAgICAgICAgICAgICAiZmFsc2UiLAogICAgICAgICAgICAgICAgICAgIFN0cmluZyhwYXJhbTMpLAogICAgICAgICAgICAgICAgICAgIFN0cmluZyhwYXJhbTQpCiAgICAgICAgICAgICAgICApOwoKICAgICAgICAgICAgbG9nKAogICAgICAgICAgICAgICAgImNoZWNrQ29tcGxldGU6IiwKICAgICAgICAgICAgICAgIGlkLAogICAgICAgICAgICAgICAgImZhbHNlIiwKICAgICAgICAgICAgICAgIHBhcmFtMywKICAgICAgICAgICAgICAgIHBhcmFtNCwKICAgICAgICAgICAgICAgICI9PiIsCiAgICAgICAgICAgICAgICByZXN1bHQKICAgICAgICAgICAgKTsKICAgICAgICB9LCAwKTsKICAgIH0KCiAgICBmdW5jdGlvbiBjb21wbGV0ZURlbGV0ZSgKICAgICAgICBwbGF5ZXIsCiAgICAgICAgcGF0aAogICAgKSB7CiAgICAgICAgc2V0VGltZW91dCgoKSA9PiB7CiAgICAgICAgICAgIGNvbnN0IHJlc3VsdCA9CiAgICAgICAgICAgICAgICBjYWxsRXh0ZXJuYWxJbnRlcmZhY2UoCiAgICAgICAgICAgICAgICAgICAgcGxheWVyLAogICAgICAgICAgICAgICAgICAgICJkZWxldGVDb21wbGV0ZSIsCiAgICAgICAgICAgICAgICAgICAgInRydWUiLAogICAgICAgICAgICAgICAgICAgIFN0cmluZyhwYXRoKQogICAgICAgICAgICAgICAgKTsKCiAgICAgICAgICAgIGxvZygKICAgICAgICAgICAgICAgICJkZWxldGVDb21wbGV0ZToiLAogICAgICAgICAgICAgICAgcGF0aCwKICAgICAgICAgICAgICAgICI9PiIsCiAgICAgICAgICAgICAgICByZXN1bHQKICAgICAgICAgICAgKTsKICAgICAgICB9LCAwKTsKICAgIH0KCiAgICBmdW5jdGlvbiBoYW5kbGVGc0NvbW1hbmQoCiAgICAgICAgcGxheWVyLAogICAgICAgIGNvbW1hbmQsCiAgICAgICAgYXJncwogICAgKSB7CiAgICAgICAgbG9nKAogICAgICAgICAgICAiZnNjb21tYW5kOiIsCiAgICAgICAgICAgIGNvbW1hbmQsCiAgICAgICAgICAgIGFyZ3MKICAgICAgICApOwoKICAgICAgICBzd2l0Y2ggKAogICAgICAgICAgICBjb21tYW5kCiAgICAgICAgKSB7CiAgICAgICAgICAgIGNhc2UgInNldFZlcnNpb24iOgogICAgICAgICAgICAgICAgc3RhdGUuZmxhc2hWZXJzaW9uID0KICAgICAgICAgICAgICAgICAgICBTdHJpbmcoYXJncyk7CgogICAgICAgICAgICAgICAgbG9nKAogICAgICAgICAgICAgICAgICAgICJGbGFzaCB2ZXJzaW9uOiIsCiAgICAgICAgICAgICAgICAgICAgc3RhdGUuZmxhc2hWZXJzaW9uCiAgICAgICAgICAgICAgICApOwogICAgICAgICAgICAgICAgYnJlYWs7CgogICAgICAgICAgICBjYXNlICJjaGVja1Jlc291cmNlIjogewogICAgICAgICAgICAgICAgY29uc3QgcGFydHMgPQogICAgICAgICAgICAgICAgICAgIFN0cmluZyhhcmdzKQogICAgICAgICAgICAgICAgICAgICAgICAuc3BsaXQoInwiKTsKCiAgICAgICAgICAgICAgICBjb25zdCBpZCA9CiAgICAgICAgICAgICAgICAgICAgcGFydHMuc2hpZnQoKSB8fCAiIjsKCiAgICAgICAgICAgICAgICAvKgogICAgICAgICAgICAgICAgICogRXhwZWN0ZWQ6CiAgICAgICAgICAgICAgICAgKiAgIGlkfHBhcmFtMnxwYXJhbTN8cGFyYW00CiAgICAgICAgICAgICAgICAgKi8KCiAgICAgICAgICAgICAgICBjb21wbGV0ZUNoZWNrKAogICAgICAgICAgICAgICAgICAgIHBsYXllciwKICAgICAgICAgICAgICAgICAgICBpZCwKICAgICAgICAgICAgICAgICAgICBbCiAgICAgICAgICAgICAgICAgICAgICAgIGlkLAogICAgICAgICAgICAgICAgICAgICAgICAuLi5wYXJ0cwogICAgICAgICAgICAgICAgICAgIF0KICAgICAgICAgICAgICAgICk7CiAgICAgICAgICAgICAgICBicmVhazsKICAgICAgICAgICAgfQoKICAgICAgICAgICAgY2FzZSAiZGVsZXRlUmVzb3VyY2UiOgogICAgICAgICAgICAgICAgY29tcGxldGVEZWxldGUoCiAgICAgICAgICAgICAgICAgICAgcGxheWVyLAogICAgICAgICAgICAgICAgICAgIGFyZ3MKICAgICAgICAgICAgICAgICk7CiAgICAgICAgICAgICAgICBicmVhazsKCiAgICAgICAgICAgIGNhc2UgInByaW50VGVzdCI6CiAgICAgICAgICAgICAgICBsb2coCiAgICAgICAgICAgICAgICAgICAgIkZsYXNoOiIsCiAgICAgICAgICAgICAgICAgICAgYXJncwogICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgICAgIGJyZWFrOwoKICAgICAgICAgICAgY2FzZSAiYWxlcnRBbmRSZXN0YXJ0IjoKICAgICAgICAgICAgICAgIHdhcm4oCiAgICAgICAgICAgICAgICAgICAgIkd1bm55IHJlcXVlc3RlZCBhbGVydEFuZFJlc3RhcnQ6IiwKICAgICAgICAgICAgICAgICAgICBhcmdzCiAgICAgICAgICAgICAgICApOwogICAgICAgICAgICAgICAgYnJlYWs7CgogICAgICAgICAgICBjYXNlICJzZXREYWlseVRhc2siOgogICAgICAgICAgICBjYXNlICJzZXREYWlseUFjdGl2aXR5IjoKICAgICAgICAgICAgY2FzZSAic2V0RmF0aWd1ZSI6CiAgICAgICAgICAgIGNhc2UgInNldFNvdW5kIjoKICAgICAgICAgICAgICAgIGxvZygKICAgICAgICAgICAgICAgICAgICBjb21tYW5kICsgIjoiLAogICAgICAgICAgICAgICAgICAgIGFyZ3MKICAgICAgICAgICAgICAgICk7CiAgICAgICAgICAgICAgICBicmVhazsKCiAgICAgICAgICAgIGRlZmF1bHQ6CiAgICAgICAgICAgICAgICBsb2coCiAgICAgICAgICAgICAgICAgICAgIlVuaGFuZGxlZCBmc2NvbW1hbmQ6IiwKICAgICAgICAgICAgICAgICAgICBjb21tYW5kLAogICAgICAgICAgICAgICAgICAgIGFyZ3MKICAgICAgICAgICAgICAgICk7CiAgICAgICAgfQogICAgfQoKICAgIGZ1bmN0aW9uIGluc3RhbGxHbG9iYWxGdW5jdGlvbnMoKSB7CiAgICAgICAgLyoKICAgICAgICAgKiBFeHRlcm5hbEludGVyZmFjZS5jYWxsKCkgaW4gTG9hZGluZy5zd2YgY2FsbHMKICAgICAgICAgKiB0aGUgZm9sbG93aW5nIHBhZ2Utc2lkZSBmdW5jdGlvbnMuCiAgICAgICAgICoKICAgICAgICAgKiBUaGVzZSBhcmUgaW50ZW50aW9uYWxseSBzbWFsbCBjb21wYXRpYmlsaXR5IHNoaW1zLgogICAgICAgICAqLwoKICAgICAgICBpZiAoCiAgICAgICAgICAgIHR5cGVvZiB3aW5kb3cuSXNEZXNrdG9wICE9PQogICAgICAgICAgICAiZnVuY3Rpb24iCiAgICAgICAgKSB7CiAgICAgICAgICAgIHdpbmRvdy5Jc0Rlc2t0b3AgPQogICAgICAgICAgICAgICAgZnVuY3Rpb24gKCkgewogICAgICAgICAgICAgICAgICAgIC8qCiAgICAgICAgICAgICAgICAgICAgICogTG9hZGluZy5zd2YgdGhlbiBpbnZva2VzIHRoZQogICAgICAgICAgICAgICAgICAgICAqIEV4dGVybmFsSW50ZXJmYWNlIGNhbGxiYWNrOgogICAgICAgICAgICAgICAgICAgICAqCiAgICAgICAgICAgICAgICAgICAgICogICBTZXRJc0Rlc2t0b3AoKQogICAgICAgICAgICAgICAgICAgICAqCiAgICAgICAgICAgICAgICAgICAgICogRmluZCB0aGUgYWN0aXZlIHBsYXllciBhbmQgY2FsbCBpdC4KICAgICAgICAgICAgICAgICAgICAgKi8KICAgICAgICAgICAgICAgICAgICBmb3IgKAogICAgICAgICAgICAgICAgICAgICAgICBjb25zdCBwbGF5ZXIKICAgICAgICAgICAgICAgICAgICAgICAgb2Ygc3RhdGUucGxheWVycwogICAgICAgICAgICAgICAgICAgICkgewogICAgICAgICAgICAgICAgICAgICAgICBjYWxsRXh0ZXJuYWxJbnRlcmZhY2UoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBwbGF5ZXIsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAiU2V0SXNEZXNrdG9wIgogICAgICAgICAgICAgICAgICAgICAgICApOwogICAgICAgICAgICAgICAgICAgIH0KCiAgICAgICAgICAgICAgICAgICAgcmV0dXJuIHRydWU7CiAgICAgICAgICAgICAgICB9OwogICAgICAgIH0KCiAgICAgICAgaWYgKAogICAgICAgICAgICB0eXBlb2Ygd2luZG93LmlzU2FmZUZsYXNoICE9PQogICAgICAgICAgICAiZnVuY3Rpb24iCiAgICAgICAgKSB7CiAgICAgICAgICAgIHdpbmRvdy5pc1NhZmVGbGFzaCA9CiAgICAgICAgICAgICAgICBmdW5jdGlvbiAodmVyc2lvbikgewogICAgICAgICAgICAgICAgICAgIGxvZygKICAgICAgICAgICAgICAgICAgICAgICAgImlzU2FmZUZsYXNoOiIsCiAgICAgICAgICAgICAgICAgICAgICAgIHZlcnNpb24KICAgICAgICAgICAgICAgICAgICApOwoKICAgICAgICAgICAgICAgICAgICAvKgogICAgICAgICAgICAgICAgICAgICAqIFdlIGFyZSB1c2luZyBSdWZmbGUgcmF0aGVyIHRoYW4KICAgICAgICAgICAgICAgICAgICAgKiBBZG9iZSBQZXBwZXIgRmxhc2guIFJldHVybiB0cnVlIHNvCiAgICAgICAgICAgICAgICAgICAgICogR3VubnkncyBvbGQgc2FmZXR5IGdhdGUgZG9lcyBub3QKICAgICAgICAgICAgICAgICAgICAgKiByZWplY3QgdGhlIHJ1bnRpbWUuCiAgICAgICAgICAgICAgICAgICAgICovCiAgICAgICAgICAgICAgICAgICAgcmV0dXJuIHRydWU7CiAgICAgICAgICAgICAgICB9OwogICAgICAgIH0KCiAgICAgICAgaWYgKAogICAgICAgICAgICB0eXBlb2Ygd2luZG93LnNldEZsYXNoRm9jdXMgIT09CiAgICAgICAgICAgICJmdW5jdGlvbiIKICAgICAgICApIHsKICAgICAgICAgICAgd2luZG93LnNldEZsYXNoRm9jdXMgPQogICAgICAgICAgICAgICAgZnVuY3Rpb24gKCkgewogICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IHBsYXllciA9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBmaW5kUGxheWVyKCk7CgogICAgICAgICAgICAgICAgICAgICAgICBpZiAoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBwbGF5ZXIgJiYKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHR5cGVvZiBwbGF5ZXIuZm9jdXMgPT09CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAiZnVuY3Rpb24iCiAgICAgICAgICAgICAgICAgICAgICAgICkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgcGxheWVyLmZvY3VzKCk7CiAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICB9IGNhdGNoIChfKSB7fQoKICAgICAgICAgICAgICAgICAgICByZXR1cm4gdHJ1ZTsKICAgICAgICAgICAgICAgIH07CiAgICAgICAgfQoKICAgICAgICBpZiAoCiAgICAgICAgICAgIHR5cGVvZiB3aW5kb3cuYWx0ZXJCYWNrZ3JvdW5kSW1nICE9PQogICAgICAgICAgICAiZnVuY3Rpb24iCiAgICAgICAgKSB7CiAgICAgICAgICAgIHdpbmRvdy5hbHRlckJhY2tncm91bmRJbWcgPQogICAgICAgICAgICAgICAgZnVuY3Rpb24gKHJlbGF0aXZlUGF0aCkgewogICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IHVybCA9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBuZXcgVVJMKAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFN0cmluZyhyZWxhdGl2ZVBhdGgpLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHdpbmRvdy5sb2NhdGlvbi5ocmVmCiAgICAgICAgICAgICAgICAgICAgICAgICAgICApOwoKICAgICAgICAgICAgICAgICAgICAgICAgaWYgKAogICAgICAgICAgICAgICAgICAgICAgICAgICAgZG9jdW1lbnQuYm9keQogICAgICAgICAgICAgICAgICAgICAgICApIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGRvY3VtZW50LmJvZHkuc3R5bGUuYmFja2dyb3VuZEltYWdlID0KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBgdXJsKCIke3VybC5ocmVmfSIpYDsKICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIH0gY2F0Y2ggKGVycm9yKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIHdhcm4oCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAiYWx0ZXJCYWNrZ3JvdW5kSW1nIGZhaWxlZDoiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgZXJyb3IKICAgICAgICAgICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgICAgICAgICB9CgogICAgICAgICAgICAgICAgICAgIHJldHVybiB0cnVlOwogICAgICAgICAgICAgICAgfTsKICAgICAgICB9CgogICAgICAgIGlmICgKICAgICAgICAgICAgdHlwZW9mIHdpbmRvdy5XaW5kb3dSZXR1cm4gIT09CiAgICAgICAgICAgICJmdW5jdGlvbiIKICAgICAgICApIHsKICAgICAgICAgICAgd2luZG93LldpbmRvd1JldHVybiA9CiAgICAgICAgICAgICAgICBmdW5jdGlvbiAoKSB7CiAgICAgICAgICAgICAgICAgICAgbG9nKAogICAgICAgICAgICAgICAgICAgICAgICAiV2luZG93UmV0dXJuIHJlcXVlc3RlZC4iCiAgICAgICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgICAgICAgICByZXR1cm4gdHJ1ZTsKICAgICAgICAgICAgICAgIH07CiAgICAgICAgfQoKICAgICAgICAvKgogICAgICAgICAqIExvYWRlck1hbmFnZXIgcmVnaXN0ZXJzIFNldEZsYXNoTG9hZEV4dGVybmFsCiAgICAgICAgICogYW5kIEV4dGVybmFsTG9hZFN0b3AuIFdlIGRlbGliZXJhdGVseSBrZWVwIEd1bm55CiAgICAgICAgICogaW4gbm9ybWFsIHdlYiBtb2RlLCBzbyB0aGVzZSBiZWNvbWUgaGFybWxlc3MuCiAgICAgICAgICovCgogICAgICAgIGlmICgKICAgICAgICAgICAgdHlwZW9mIHdpbmRvdy5TZXRGbGFzaExvYWRFeHRlcm5hbCAhPT0KICAgICAgICAgICAgImZ1bmN0aW9uIgogICAgICAgICkgewogICAgICAgICAgICB3aW5kb3cuU2V0Rmxhc2hMb2FkRXh0ZXJuYWwgPQogICAgICAgICAgICAgICAgZnVuY3Rpb24gKCkgewogICAgICAgICAgICAgICAgICAgIGxvZygKICAgICAgICAgICAgICAgICAgICAgICAgIklnbm9yaW5nIFNldEZsYXNoTG9hZEV4dGVybmFsOyB1c2luZyB3ZWIgbG9hZGVyLiIKICAgICAgICAgICAgICAgICAgICApOwogICAgICAgICAgICAgICAgICAgIHJldHVybiB0cnVlOwogICAgICAgICAgICAgICAgfTsKICAgICAgICB9CgogICAgICAgIGlmICgKICAgICAgICAgICAgdHlwZW9mIHdpbmRvdy5FeHRlcm5hbExvYWRTdG9wICE9PQogICAgICAgICAgICAiZnVuY3Rpb24iCiAgICAgICAgKSB7CiAgICAgICAgICAgIHdpbmRvdy5FeHRlcm5hbExvYWRTdG9wID0KICAgICAgICAgICAgICAgIGZ1bmN0aW9uICgKICAgICAgICAgICAgICAgICAgICBpZCwKICAgICAgICAgICAgICAgICAgICB1cmwKICAgICAgICAgICAgICAgICkgewogICAgICAgICAgICAgICAgICAgIGxvZygKICAgICAgICAgICAgICAgICAgICAgICAgIkV4dGVybmFsTG9hZFN0b3AgaWdub3JlZDoiLAogICAgICAgICAgICAgICAgICAgICAgICBpZCwKICAgICAgICAgICAgICAgICAgICAgICAgdXJsCiAgICAgICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgICAgICAgICByZXR1cm4gdHJ1ZTsKICAgICAgICAgICAgICAgIH07CiAgICAgICAgfQoKICAgICAgICBpZiAoCiAgICAgICAgICAgIHR5cGVvZiB3aW5kb3cuRXh0ZXJuYWxMb2FkU3RhcnQgIT09CiAgICAgICAgICAgICJmdW5jdGlvbiIKICAgICAgICApIHsKICAgICAgICAgICAgd2luZG93LkV4dGVybmFsTG9hZFN0YXJ0ID0KICAgICAgICAgICAgICAgIGZ1bmN0aW9uICgKICAgICAgICAgICAgICAgICAgICBpZCwKICAgICAgICAgICAgICAgICAgICB1cmwKICAgICAgICAgICAgICAgICkgewogICAgICAgICAgICAgICAgICAgIGxvZygKICAgICAgICAgICAgICAgICAgICAgICAgIkV4dGVybmFsTG9hZFN0YXJ0OiIsCiAgICAgICAgICAgICAgICAgICAgICAgIGlkLAogICAgICAgICAgICAgICAgICAgICAgICB1cmwKICAgICAgICAgICAgICAgICAgICApOwogICAgICAgICAgICAgICAgICAgIHJldHVybiB0cnVlOwogICAgICAgICAgICAgICAgfTsKICAgICAgICB9CgogICAgICAgIGlmICgKICAgICAgICAgICAgdHlwZW9mIHdpbmRvdy5Ccm93c2VyQWdlbnQgIT09CiAgICAgICAgICAgICJmdW5jdGlvbiIKICAgICAgICApIHsKICAgICAgICAgICAgd2luZG93LkJyb3dzZXJBZ2VudCA9CiAgICAgICAgICAgICAgICBmdW5jdGlvbiAoKSB7CiAgICAgICAgICAgICAgICAgICAgcmV0dXJuIG5hdmlnYXRvci51c2VyQWdlbnQ7CiAgICAgICAgICAgICAgICB9OwogICAgICAgIH0KICAgIH0KCiAgICBmdW5jdGlvbiBmaW5kUGxheWVycygpIHsKICAgICAgICBjb25zdCBmb3VuZCA9CiAgICAgICAgICAgIG5ldyBTZXQoCiAgICAgICAgICAgICAgICBBcnJheS5mcm9tKAogICAgICAgICAgICAgICAgICAgIGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3JBbGwoCiAgICAgICAgICAgICAgICAgICAgICAgICJydWZmbGUtcGxheWVyLCBvYmplY3QsIGVtYmVkIgogICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgKTsKCiAgICAgICAgZm9yICgKICAgICAgICAgICAgY29uc3QgcGxheWVyCiAgICAgICAgICAgIG9mIGZvdW5kCiAgICAgICAgKSB7CiAgICAgICAgICAgIGlmICgKICAgICAgICAgICAgICAgIHBsYXllci5tYXRjaGVzICYmCiAgICAgICAgICAgICAgICBwbGF5ZXIubWF0Y2hlcygKICAgICAgICAgICAgICAgICAgICAicnVmZmxlLXBsYXllciIKICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgKSB7CiAgICAgICAgICAgICAgICBhZGRGc0NvbW1hbmRIYW5kbGVyKAogICAgICAgICAgICAgICAgICAgIHBsYXllcgogICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgfQoKICAgICAgICAgICAgLyoKICAgICAgICAgICAgICogV2hlbiBSdWZmbGUgcG9seWZpbGxzIGFuIDxvYmplY3Q+LzxlbWJlZD4sCiAgICAgICAgICAgICAqIHRoZSByZXBsYWNlbWVudCBwbGF5ZXIgbWF5IG5vdCBleGlzdCBkdXJpbmcKICAgICAgICAgICAgICogdGhlIHNhbWUgbXV0YXRpb24gY2FsbGJhY2suIENoZWNrIGFnYWluIHNob3J0bHkuCiAgICAgICAgICAgICAqLwogICAgICAgIH0KCiAgICAgICAgcmV0dXJuIGZvdW5kOwogICAgfQoKICAgIGZ1bmN0aW9uIGZpbmRQbGF5ZXIoKSB7CiAgICAgICAgZm9yICgKICAgICAgICAgICAgY29uc3QgcGxheWVyCiAgICAgICAgICAgIG9mIHN0YXRlLnBsYXllcnMKICAgICAgICApIHsKICAgICAgICAgICAgcmV0dXJuIHBsYXllcjsKICAgICAgICB9CgogICAgICAgIHRyeSB7CiAgICAgICAgICAgIHJldHVybiBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKAogICAgICAgICAgICAgICAgInJ1ZmZsZS1wbGF5ZXIiCiAgICAgICAgICAgICk7CiAgICAgICAgfSBjYXRjaCAoXykgewogICAgICAgICAgICByZXR1cm4gbnVsbDsKICAgICAgICB9CiAgICB9CgogICAgZnVuY3Rpb24gcHJlcGFyZUZsYXNoRWxlbWVudChub2RlKSB7CiAgICAgICAgaWYgKAogICAgICAgICAgICAhbm9kZSB8fAogICAgICAgICAgICAhbm9kZS5nZXRBdHRyaWJ1dGUKICAgICAgICApIHsKICAgICAgICAgICAgcmV0dXJuOwogICAgICAgIH0KCiAgICAgICAgY29uc3QgdHlwZSA9CiAgICAgICAgICAgICgKICAgICAgICAgICAgICAgIG5vZGUuZ2V0QXR0cmlidXRlKAogICAgICAgICAgICAgICAgICAgICJ0eXBlIgogICAgICAgICAgICAgICAgKSB8fCAiIgogICAgICAgICAgICApLnRvTG93ZXJDYXNlKCk7CgogICAgICAgIGNvbnN0IHRhZyA9CiAgICAgICAgICAgICgKICAgICAgICAgICAgICAgIG5vZGUudGFnTmFtZSB8fCAiIgogICAgICAgICAgICApLnRvTG93ZXJDYXNlKCk7CgogICAgICAgIGlmICgKICAgICAgICAgICAgdGFnICE9PSAiZW1iZWQiICYmCiAgICAgICAgICAgIHRhZyAhPT0gIm9iamVjdCIKICAgICAgICApIHsKICAgICAgICAgICAgcmV0dXJuOwogICAgICAgIH0KCiAgICAgICAgaWYgKAogICAgICAgICAgICB0eXBlID09PQogICAgICAgICAgICAiYXBwbGljYXRpb24veC1zaG9ja3dhdmUtZmxhc2giIHx8CiAgICAgICAgICAgIG5vZGUuaGFzQXR0cmlidXRlKCJkYXRhIikgfHwKICAgICAgICAgICAgbm9kZS5oYXNBdHRyaWJ1dGUoIm1vdmllIikKICAgICAgICApIHsKICAgICAgICAgICAgLyoKICAgICAgICAgICAgICogUnVmZmxlIHVzZXMgYWxsb3dTY3JpcHRBY2Nlc3MgdG8gcGVybWl0CiAgICAgICAgICAgICAqIEV4dGVybmFsSW50ZXJmYWNlL2ZzY29tbWFuZCBjb21tdW5pY2F0aW9uLgogICAgICAgICAgICAgKi8KICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIG5vZGUuc2V0QXR0cmlidXRlKAogICAgICAgICAgICAgICAgICAgICJhbGxvd1NjcmlwdEFjY2VzcyIsCiAgICAgICAgICAgICAgICAgICAgImFsd2F5cyIKICAgICAgICAgICAgICAgICk7CiAgICAgICAgICAgIH0gY2F0Y2ggKF8pIHt9CgogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgbm9kZS5zZXRBdHRyaWJ1dGUoCiAgICAgICAgICAgICAgICAgICAgImFsbG93TmV0d29ya2luZyIsCiAgICAgICAgICAgICAgICAgICAgImFsbCIKICAgICAgICAgICAgICAgICk7CiAgICAgICAgICAgIH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgfQogICAgfQoKICAgIGZ1bmN0aW9uIHNjYW5Eb20oKSB7CiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgY29uc3Qgbm9kZXMgPQogICAgICAgICAgICAgICAgZG9jdW1lbnQucXVlcnlTZWxlY3RvckFsbCgKICAgICAgICAgICAgICAgICAgICAiZW1iZWQsIG9iamVjdCwgcnVmZmxlLXBsYXllciIKICAgICAgICAgICAgICAgICk7CgogICAgICAgICAgICBmb3IgKAogICAgICAgICAgICAgICAgY29uc3Qgbm9kZQogICAgICAgICAgICAgICAgb2Ygbm9kZXMKICAgICAgICAgICAgKSB7CiAgICAgICAgICAgICAgICBwcmVwYXJlRmxhc2hFbGVtZW50KAogICAgICAgICAgICAgICAgICAgIG5vZGUKICAgICAgICAgICAgICAgICk7CgogICAgICAgICAgICAgICAgaWYgKAogICAgICAgICAgICAgICAgICAgIG5vZGUubWF0Y2hlcyAmJgogICAgICAgICAgICAgICAgICAgIG5vZGUubWF0Y2hlcygKICAgICAgICAgICAgICAgICAgICAgICAgInJ1ZmZsZS1wbGF5ZXIiCiAgICAgICAgICAgICAgICAgICAgKQogICAgICAgICAgICAgICAgKSB7CiAgICAgICAgICAgICAgICAgICAgYWRkRnNDb21tYW5kSGFuZGxlcigKICAgICAgICAgICAgICAgICAgICAgICAgbm9kZQogICAgICAgICAgICAgICAgICAgICk7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0KICAgICAgICB9IGNhdGNoIChfKSB7fQoKICAgICAgICBpbnN0YWxsR2xvYmFsRnVuY3Rpb25zKCk7CiAgICB9CgogICAgZnVuY3Rpb24gcGF0Y2hDcmVhdGVFbGVtZW50KCkgewogICAgICAgIGNvbnN0IG9yaWdpbmFsID0KICAgICAgICAgICAgZG9jdW1lbnQuY3JlYXRlRWxlbWVudDsKCiAgICAgICAgaWYgKAogICAgICAgICAgICBvcmlnaW5hbC5fX2d1bm55UGF0Y2hlZAogICAgICAgICkgewogICAgICAgICAgICByZXR1cm47CiAgICAgICAgfQoKICAgICAgICBmdW5jdGlvbiBjcmVhdGVFbGVtZW50KAogICAgICAgICAgICB0YWdOYW1lLAogICAgICAgICAgICBvcHRpb25zCiAgICAgICAgKSB7CiAgICAgICAgICAgIGNvbnN0IG5vZGUgPQogICAgICAgICAgICAgICAgb3JpZ2luYWwuY2FsbCgKICAgICAgICAgICAgICAgICAgICBkb2N1bWVudCwKICAgICAgICAgICAgICAgICAgICB0YWdOYW1lLAogICAgICAgICAgICAgICAgICAgIG9wdGlvbnMKICAgICAgICAgICAgICAgICk7CgogICAgICAgICAgICBjb25zdCBsb3dlciA9CiAgICAgICAgICAgICAgICBTdHJpbmcoCiAgICAgICAgICAgICAgICAgICAgdGFnTmFtZQogICAgICAgICAgICAgICAgKS50b0xvd2VyQ2FzZSgpOwoKICAgICAgICAgICAgaWYgKAogICAgICAgICAgICAgICAgbG93ZXIgPT09ICJlbWJlZCIgfHwKICAgICAgICAgICAgICAgIGxvd2VyID09PSAib2JqZWN0IgogICAgICAgICAgICApIHsKICAgICAgICAgICAgICAgIHF1ZXVlTWljcm90YXNrKAogICAgICAgICAgICAgICAgICAgICgpID0+CiAgICAgICAgICAgICAgICAgICAgICAgIHByZXBhcmVGbGFzaEVsZW1lbnQoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBub2RlCiAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICk7CiAgICAgICAgICAgIH0KCiAgICAgICAgICAgIHJldHVybiBub2RlOwogICAgICAgIH0KCiAgICAgICAgY3JlYXRlRWxlbWVudC5fX2d1bm55UGF0Y2hlZCA9CiAgICAgICAgICAgIHRydWU7CgogICAgICAgIGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQgPQogICAgICAgICAgICBjcmVhdGVFbGVtZW50OwogICAgfQoKICAgIGZ1bmN0aW9uIHBhdGNoU2V0QXR0cmlidXRlKCkgewogICAgICAgIGNvbnN0IG9yaWdpbmFsID0KICAgICAgICAgICAgRWxlbWVudC5wcm90b3R5cGUuc2V0QXR0cmlidXRlOwoKICAgICAgICBpZiAoCiAgICAgICAgICAgIG9yaWdpbmFsLl9fZ3VubnlQYXRjaGVkCiAgICAgICAgKSB7CiAgICAgICAgICAgIHJldHVybjsKICAgICAgICB9CgogICAgICAgIGZ1bmN0aW9uIHNldEF0dHJpYnV0ZSgKICAgICAgICAgICAgbmFtZSwKICAgICAgICAgICAgdmFsdWUKICAgICAgICApIHsKICAgICAgICAgICAgY29uc3QgcmVzdWx0ID0KICAgICAgICAgICAgICAgIG9yaWdpbmFsLmNhbGwoCiAgICAgICAgICAgICAgICAgICAgdGhpcywKICAgICAgICAgICAgICAgICAgICBuYW1lLAogICAgICAgICAgICAgICAgICAgIHZhbHVlCiAgICAgICAgICAgICAgICApOwoKICAgICAgICAgICAgY29uc3QgbG93ZXIgPQogICAgICAgICAgICAgICAgU3RyaW5nKG5hbWUpCiAgICAgICAgICAgICAgICAgICAgLnRvTG93ZXJDYXNlKCk7CgogICAgICAgICAgICBpZiAoCiAgICAgICAgICAgICAgICBsb3dlciA9PT0gInR5cGUiIHx8CiAgICAgICAgICAgICAgICBsb3dlciA9PT0gImRhdGEiIHx8CiAgICAgICAgICAgICAgICBsb3dlciA9PT0gIm1vdmllIgogICAgICAgICAgICApIHsKICAgICAgICAgICAgICAgIHByZXBhcmVGbGFzaEVsZW1lbnQoCiAgICAgICAgICAgICAgICAgICAgdGhpcwogICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgfQoKICAgICAgICAgICAgcmV0dXJuIHJlc3VsdDsKICAgICAgICB9CgogICAgICAgIHNldEF0dHJpYnV0ZS5fX2d1bm55UGF0Y2hlZCA9CiAgICAgICAgICAgIHRydWU7CgogICAgICAgIEVsZW1lbnQucHJvdG90eXBlLnNldEF0dHJpYnV0ZSA9CiAgICAgICAgICAgIHNldEF0dHJpYnV0ZTsKICAgIH0KCiAgICBmdW5jdGlvbiBzdGFydE9ic2VydmVyKCkgewogICAgICAgIGlmICgKICAgICAgICAgICAgdHlwZW9mIE11dGF0aW9uT2JzZXJ2ZXIgPT09CiAgICAgICAgICAgICJ1bmRlZmluZWQiCiAgICAgICAgKSB7CiAgICAgICAgICAgIHJldHVybjsKICAgICAgICB9CgogICAgICAgIGNvbnN0IG9ic2VydmVyID0KICAgICAgICAgICAgbmV3IE11dGF0aW9uT2JzZXJ2ZXIoCiAgICAgICAgICAgICAgICAoKSA9PiB7CiAgICAgICAgICAgICAgICAgICAgc2NhbkRvbSgpOwogICAgICAgICAgICAgICAgICAgIGZpbmRQbGF5ZXJzKCk7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICk7CgogICAgICAgIG9ic2VydmVyLm9ic2VydmUoCiAgICAgICAgICAgIGRvY3VtZW50LmRvY3VtZW50RWxlbWVudCB8fAogICAgICAgICAgICBkb2N1bWVudCwKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgY2hpbGRMaXN0OiB0cnVlLAogICAgICAgICAgICAgICAgc3VidHJlZTogdHJ1ZQogICAgICAgICAgICB9CiAgICAgICAgKTsKICAgIH0KCiAgICBmdW5jdGlvbiBzdGFydFJ1ZmZsZSgpIHsKICAgICAgICBpbnN0YWxsR2xvYmFsRnVuY3Rpb25zKCk7CiAgICAgICAgcGF0Y2hDcmVhdGVFbGVtZW50KCk7CiAgICAgICAgcGF0Y2hTZXRBdHRyaWJ1dGUoKTsKICAgICAgICBzY2FuRG9tKCk7CgogICAgICAgIGNvbnN0IGFwaSA9CiAgICAgICAgICAgIGdldFJ1ZmZsZUFwaSgpOwoKICAgICAgICBpZiAoIWFwaSkgewogICAgICAgICAgICB3YXJuKAogICAgICAgICAgICAgICAgIlJ1ZmZsZSBBUEkgbm90IGF2YWlsYWJsZSB5ZXQuIgogICAgICAgICAgICApOwoKICAgICAgICAgICAgcmV0dXJuIGZhbHNlOwogICAgICAgIH0KCiAgICAgICAgc3RhdGUucmVhZHkgPSB0cnVlOwoKICAgICAgICB0cnkgewogICAgICAgICAgICBhcGkucGx1Z2luUG9seWZpbGwoKTsKICAgICAgICB9IGNhdGNoIChlcnJvcikgewogICAgICAgICAgICB3YXJuKAogICAgICAgICAgICAgICAgInBsdWdpblBvbHlmaWxsIGZhaWxlZDoiLAogICAgICAgICAgICAgICAgZXJyb3IKICAgICAgICAgICAgKTsKICAgICAgICB9CgogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGFwaS5wb2x5ZmlsbCgpOwogICAgICAgIH0gY2F0Y2ggKGVycm9yKSB7CiAgICAgICAgICAgIHdhcm4oCiAgICAgICAgICAgICAgICAicG9seWZpbGwgZmFpbGVkOiIsCiAgICAgICAgICAgICAgICBlcnJvcgogICAgICAgICAgICApOwogICAgICAgIH0KCiAgICAgICAgLyoKICAgICAgICAgKiBUaGUgUnVmZmxlIGV4dGVuc2lvbiBtYXkgY3JlYXRlIGEgcGxheWVyCiAgICAgICAgICogYXN5bmNocm9ub3VzbHkuIFJlLXNjYW4gZm9yIGEgc2hvcnQgcGVyaW9kLgogICAgICAgICAqLwogICAgICAgIGxldCBhdHRlbXB0cyA9IDA7CgogICAgICAgIGNvbnN0IHRpbWVyID0KICAgICAgICAgICAgc2V0SW50ZXJ2YWwoCiAgICAgICAgICAgICAgICAoKSA9PiB7CiAgICAgICAgICAgICAgICAgICAgYXR0ZW1wdHMgKz0gMTsKCiAgICAgICAgICAgICAgICAgICAgc2NhbkRvbSgpOwogICAgICAgICAgICAgICAgICAgIGZpbmRQbGF5ZXJzKCk7CgogICAgICAgICAgICAgICAgICAgIGlmICgKICAgICAgICAgICAgICAgICAgICAgICAgYXR0ZW1wdHMgPj0gMjQwCiAgICAgICAgICAgICAgICAgICAgKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNsZWFySW50ZXJ2YWwoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICB0aW1lcgogICAgICAgICAgICAgICAgICAgICAgICApOwogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAyNQogICAgICAgICAgICApOwoKICAgICAgICByZXR1cm4gdHJ1ZTsKICAgIH0KCiAgICBmdW5jdGlvbiBib290KCkgewogICAgICAgIHN0YXJ0T2JzZXJ2ZXIoKTsKCiAgICAgICAgbGV0IGF0dGVtcHRzID0gMDsKCiAgICAgICAgY29uc3QgdGltZXIgPQogICAgICAgICAgICBzZXRJbnRlcnZhbCgKICAgICAgICAgICAgICAgICgpID0+IHsKICAgICAgICAgICAgICAgICAgICBhdHRlbXB0cyArPSAxOwoKICAgICAgICAgICAgICAgICAgICBpZiAoCiAgICAgICAgICAgICAgICAgICAgICAgIHN0YXJ0UnVmZmxlKCkKICAgICAgICAgICAgICAgICAgICApIHsKICAgICAgICAgICAgICAgICAgICAgICAgY2xlYXJJbnRlcnZhbCgKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHRpbWVyCiAgICAgICAgICAgICAgICAgICAgICAgICk7CiAgICAgICAgICAgICAgICAgICAgfQoKICAgICAgICAgICAgICAgICAgICBpZiAoCiAgICAgICAgICAgICAgICAgICAgICAgIGF0dGVtcHRzID49IDI0MAogICAgICAgICAgICAgICAgICAgICkgewogICAgICAgICAgICAgICAgICAgICAgICBjbGVhckludGVydmFsKAogICAgICAgICAgICAgICAgICAgICAgICAgICAgdGltZXIKICAgICAgICAgICAgICAgICAgICAgICAgKTsKCiAgICAgICAgICAgICAgICAgICAgICAgIHdhcm4oCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAiUnVmZmxlIHdhcyBub3QgZGV0ZWN0ZWQgYWZ0ZXIgNiBzZWNvbmRzLiIKICAgICAgICAgICAgICAgICAgICAgICAgKTsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgMjUKICAgICAgICAgICAgKTsKICAgIH0KCiAgICBib290KCk7CgogICAgbG9nKAogICAgICAgICJHdW5ueSBob3N0IGJyaWRnZSBsb2FkZWQuIgogICAgKTsKfSkoKTsK
+        | base64 --decode > build/bridge/gunny-host.js
+
+        node --check build/bridge/gunny-host.js
+
+        wc -l build/bridge/gunny-host.js'
+    - name: Download Ruffle self-hosted
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: "set -euo pipefail\nrm -rf build/ruffle\nmkdir -p build/ruffle\ncd build/ruffle\n\
+        \ngh release download \"v${RUFFLE_VERSION}\" \\\n  --repo ruffle-rs/ruffle\
+        \ \\\n  --pattern \"*web*selfhosted*.zip\" \\\n  --clobber\n\nZIP=\"$(find\
+        \ . -maxdepth 1 -type f -name \"*.zip\" -print | head -n 1)\"\n[ -n \"$ZIP\"\
+        \ ] || { echo \"ERROR: Ruffle asset not found.\"; exit 1; }\n\nmkdir extracted\n\
+        unzip -q -o \"$ZIP\" -d extracted\n\nRUFFLE_JS=\"$(find extracted -type f\
+        \ -name \"ruffle.js\" -print | head -n 1)\"\n[ -n \"$RUFFLE_JS\" ] || { echo\
+        \ \"ERROR: ruffle.js not found.\"; exit 1; }\n\nprintf '%s\\n' \"$(dirname\
+        \ \"$RUFFLE_JS\")\" \\\n  > \"$GITHUB_WORKSPACE/build/ruffle-root.txt\""
+    - name: Auto-patch game BrowserWindow
+      shell: bash
+      run: "\nset -euo pipefail\n\nMAIN=\"$(cat build/main-path.txt)\"\n\npython3\
+        \ <<'PY'\nfrom pathlib import Path\nimport json\nimport re\n\nmain = Path(\n\
+        \    Path(\"build/main-path.txt\").read_text().strip()\n)\n\nreport = json.loads(\n\
+        \    Path(\"build/autodetect-report.json\").read_text()\n)\n\ntext = main.read_text(\n\
+        \    encoding=\"utf-8-sig\"\n)\n\nwindows = report.get(\n    \"browser_windows\"\
+        ,\n    []\n)\n\nif not windows:\n    print(\n        \"WARNING: no BrowserWindow\
+        \ report; \"\n        \"falling back to generic safe patch.\"\n    )\n   \
+        \ selected = None\nelse:\n    selected = sorted(\n        windows,\n     \
+        \   key=lambda x: (\n            -x[\"score\"],\n            x[\"index\"]\n\
+        \        )\n    )[0]\n\nif selected is not None and selected[\"score\"] >=\
+        \ 25:\n    # Identify the BrowserWindow by source excerpt.\n    excerpt =\
+        \ selected[\"source_excerpt\"]\n    start = text.find(excerpt)\n\n    if start\
+        \ < 0:\n        # Use a distinctive first chunk rather than exact entire block.\n\
+        \        fingerprint = excerpt[:500]\n\n        start = text.find(\n     \
+        \       fingerprint\n        )\n\n    if start < 0:\n        print(\n    \
+        \        \"WARNING: selected BrowserWindow block \"\n            \"could not\
+        \ be located exactly.\"\n        )\n        selected = None\n\nif selected\
+        \ is not None:\n    excerpt = selected[\"source_excerpt\"]\n\n    start =\
+        \ text.find(\n        excerpt\n    )\n\n    if start < 0:\n        start =\
+        \ text.find(\n            excerpt[:500]\n        )\n\n    if start < 0:\n\
+        \        selected = None\n\nif selected is not None:\n    # Find the real\
+        \ object start before the source excerpt.\n    constructor = text.rfind(\n\
+        \        \"new BrowserWindow\",\n        0,\n        start + 1\n    )\n\n\
+        \    if constructor < 0:\n        selected = None\n\nif selected is not None:\n\
+        \    brace = text.find(\n        \"{\",\n        constructor\n    )\n\n  \
+        \  if brace < 0:\n        selected = None\n\nif selected is not None:\n  \
+        \  depth = 0\n    quote = None\n    escape = False\n    end = -1\n\n    for\
+        \ i in range(\n        brace,\n        len(text)\n    ):\n        c = text[i]\n\
+        \n        if quote:\n            if escape:\n                escape = False\n\
+        \            elif c == \"\\\\\":\n                escape = True\n        \
+        \    elif c == quote:\n                quote = None\n            continue\n\
+        \n        if c in (\"'\", '\"', \"`\"):\n            quote = c\n         \
+        \   continue\n\n        if c == \"{\":\n            depth += 1\n\n       \
+        \ elif c == \"}\":\n            depth -= 1\n\n            if depth == 0:\n\
+        \                end = i + 1\n                break\n\n    if end < 0:\n \
+        \       selected = None\n\nif selected is not None:\n    window = text[\n\
+        \        constructor:end\n    ]\n\n    # Keep contextIsolation untouched.\n\
+        \    # Sandbox is disabled only in the selected game/Flash window.\n    if\
+        \ re.search(\n        r\"\\bsandbox\\s*:\\s*true\",\n        window,\n   \
+        \     re.I\n    ):\n        window = re.sub(\n            r\"(\\bsandbox\\\
+        s*:\\s*)true\",\n            r\"\\1false\",\n            window,\n       \
+        \     count=1\n        )\n    elif not re.search(\n        r\"\\bsandbox\\\
+        s*:\",\n        window,\n        re.I\n    ):\n        window, count = re.subn(\n\
+        \            r\"(webPreferences\\s*:\\s*\\{)\",\n            r\"\\1\\n   \
+        \     sandbox: false,\",\n            window,\n            count=1\n     \
+        \   )\n\n        if count != 1:\n            selected = None\n\n    if selected\
+        \ is not None:\n        window = re.sub(\n            r\"(\\bplugins\\s*:\\\
+        s*)false\",\n            r\"\\1true\",\n            window,\n            count=1\n\
+        \        )\n\n        replacement = \"\"\"preload: path.join(\n        process.resourcesPath,\n\
+        \        'preload-ruffle.js'\n      ),\"\"\"\n\n        patterns = [\n   \
+        \         re.compile(\n                r\"\"\"preload\\s*:\\s*app\\.isPackaged\\\
+        s*\\?\\s*path\\.join\\([\\s\\S]*?\\)\\s*:\\s*path\\.join\\([\\s\\S]*?\\)\\\
+        s*,?\"\"\",\n                re.I\n            ),\n            re.compile(\n\
+        \                r\"\"\"preload\\s*:\\s*path\\.join\\([\\s\\S]*?\\)\\s*,?\"\
+        \"\",\n                re.I\n            ),\n            re.compile(\n   \
+        \             r\"\"\"preload\\s*:\\s*[^,\\n}]+\\s*,?\"\"\",\n            \
+        \    re.I\n            ),\n        ]\n\n        changed = False\n\n      \
+        \  for pattern in patterns:\n            window, count = pattern.subn(\n \
+        \               replacement,\n                window,\n                count=1\n\
+        \            )\n\n            if count == 1:\n                changed = True\n\
+        \                break\n\n        if changed:\n            text = (\n    \
+        \            text[:constructor]\n                + window\n              \
+        \  + text[end:]\n            )\n\n            print(\n                \"Patched\
+        \ highest-scoring BrowserWindow \"\n                \"for Ruffle.\"\n    \
+        \        )\n        else:\n            selected = None\n\n# If automatic targeting\
+        \ was uncertain, do NOT fail the build.\n# We still remove PPAPI launch switches\
+        \ and leave the original window intact.\nif selected is None:\n    print(\n\
+        \        \"WARNING: Could not safely replace game preload.\"\n    )\n    print(\n\
+        \        \"Continuing with native PPAPI disabled only.\"\n    )\n\n# Always\
+        \ remove native Pepper Flash launch switches.\nfor pattern in [\n    r\"\"\
+        \"[A-Za-z0-9_$.\\[\\]]+\\.appendSwitch\\s*\\(\\s*['\"]ppapi-flash-path['\"\
+        ]\\s*,[\\s\\S]*?\\)\\s*;\"\"\",\n    r\"\"\"[A-Za-z0-9_$.\\[\\]]+\\.appendSwitch\\\
+        s*\\(\\s*['\"]ppapi-flash-version['\"]\\s*,[\\s\\S]*?\\)\\s*;\"\"\",\n]:\n\
+        \    text = re.sub(\n        pattern,\n        \"\",\n        text,\n    \
+        \    flags=re.I\n    )\n\n# Disable the concrete flashPath assignment if present.\n\
+        text = re.sub(\n    r\"(\\bconst\\s+flashPath\\s*=\\s*)findFlashPath\\s*\\\
+        (\\s*\\)\\s*;\",\n    r\"\\1null;\",\n    text,\n    count=1\n)\n\n# Remove\
+        \ mms.cfg deployment call if present.\ntext = re.sub(\n    r\"(?m)^[ \\t]*_deployFlashMmsCfg\\\
+        s*\\([^;]*\\)\\s*;[^\\n]*\\n?\",\n    \"\",\n    text\n)\n\nmain.write_text(\n\
+        \    text,\n    encoding=\"utf-8\"\n)\n\nprint(\"PPAPI neutralization completed.\"\
+        )\nPY\n\nnode \\\n  --check \\\n  \"$MAIN\"\n"
+    - name: Automatic patch diagnostics
+      shell: bash
+      run: "\nset -euo pipefail\n\necho \"=== MAIN ===\"\ncat build/main-path.txt\n\
+        \necho\necho \"=== PRELOAD ===\"\ncat build/preload-relative.txt\n\necho\n\
+        echo \"=== AUTODETECT ===\"\ncat build/autodetect-report.json | head -1000\n\
+        \necho\necho \"=== REMAINING PPAPI REFERENCES ===\"\ngrep -niE \\\n  \"ppapi-flash-path|ppapi-flash-version|findFlashPath|PepperFlashPlayer\"\
+        \ \\\n  \"$(cat build/main-path.txt)\" \\\n  | head -300 \\\n  || true\n\n\
+        echo\necho \"Automatic patch stage completed.\"\n"
+    - name: Repack app.asar
+      shell: bash
+      run: 'set -euo pipefail
+
+        APP="$(cat build/original-app.txt)"
+
+        ASAR="$APP/Contents/Resources/app.asar"
+
+        rm -f "$ASAR"
+
+        asar pack build/source "$ASAR"'
+    - name: Download Electron ARM64
+      shell: bash
+      run: "set -euo pipefail\nURL=\"https://github.com/electron/electron/releases/download/v${ELECTRON_VERSION}/electron-v${ELECTRON_VERSION}-darwin-arm64.zip\"\
+        \n\ncurl --fail --location --retry 10 --retry-delay 5 \\\n  --connect-timeout\
+        \ 30 --max-time 1800 -A \"Mozilla/5.0\" \\\n  \"$URL\" -o build/electron-arm64.zip\n\
+        \nmkdir -p build/electron\nunzip -q -o build/electron-arm64.zip -d build/electron\n\
+        \nELECTRON_APP=\"$(find build/electron -type d -name \"Electron.app\" -print\
+        \ | head -n 1)\"\n[ -n \"$ELECTRON_APP\" ] || { echo \"ERROR: Electron.app\
+        \ not found.\"; exit 1; }\n\nprintf '%s\\n' \"$ELECTRON_APP\" > build/electron-app.txt\n\
+        file \"$ELECTRON_APP/Contents/MacOS/Electron\"\nlipo -info \"$ELECTRON_APP/Contents/MacOS/Electron\""
+    - name: Assemble ARM64 app
+      shell: bash
+      run: 'set -euo pipefail
+
+        ORIGINAL="$(cat build/original-app.txt)"
+
+        ELECTRON_APP="$(cat build/electron-app.txt)"
+
+        FINAL="build/Gunny PC ARM64.app"
+
+
+        rm -rf "$FINAL"
+
+        cp -R "$ELECTRON_APP" "$FINAL"
+
+
+        SRC="$ORIGINAL/Contents/Resources"
+
+        DST="$FINAL/Contents/Resources"
+
+
+        rsync -a --exclude="app.asar" "$SRC/" "$DST/"
+
+        cp "$SRC/app.asar" "$DST/app.asar"'
+    - name: Install Ruffle and Gunny bridge
+      shell: bash
+      run: "set -euo pipefail\n\nAPP=\"build/Gunny PC ARM64.app\"\nRES=\"$APP/Contents/Resources\"\
+        \nRUFFLE_ROOT=\"$(cat build/ruffle-root.txt)\"\nPRELOAD_REL=\"$(cat build/preload-relative.txt)\"\
+        \n\nrm -rf \"$RES/ruffle\"\nmkdir -p \"$RES/ruffle\"\n\ncp -R \"$RUFFLE_ROOT\"\
+        /. \"$RES/ruffle/\"\ncp build/bridge/gunny-host.js \"$RES/gunny-host.js\"\n\
+        \ntest -f \"$RES/ruffle/ruffle.js\"\nnode --check \"$RES/gunny-host.js\"\n\
+        \ncat > \"$RES/preload-ruffle.js\" <<EOF\n'use strict';\n\nconst fs = require('fs');\n\
+        const path = require('path');\nconst { webFrame } = require('electron');\n\
+        \nconst resources = process.resourcesPath;\nconst ruffleFile = path.join(resources,\
+        \ 'ruffle', 'ruffle.js');\nconst bridgeFile = path.join(resources, 'gunny-host.js');\n\
+        const originalPreload = path.join(resources, 'app.asar', '$PRELOAD_REL');\n\
+        \nif (!fs.existsSync(ruffleFile)) {\n  throw new Error('Ruffle runtime missing:\
+        \ ' + ruffleFile);\n}\n\nif (!fs.existsSync(bridgeFile)) {\n  throw new Error('Gunny\
+        \ host bridge missing: ' + bridgeFile);\n}\n\nconst ruffleSource = fs.readFileSync(ruffleFile,\
+        \ 'utf8');\nconst bridgeSource = fs.readFileSync(bridgeFile, 'utf8');\n\n\
+        const publicPath =\n  'file://' +\n  path.join(resources, 'ruffle').replace(/\\\
+        \\\\\\/g, '/') +\n  '/';\n\nconst code = [\n  '(function(){',\n  'try {',\n\
+        \  'window.RufflePlayer = window.RufflePlayer || {};',\n  'window.RufflePlayer.config\
+        \ = window.RufflePlayer.config || {};',\n  'window.RufflePlayer.config.publicPath\
+        \ = ' + JSON.stringify(publicPath) + ';',\n  'window.RufflePlayer.config.allowNetworking\
+        \ = \"all\";',\n  'window.RufflePlayer.config.allowScriptAccess = \"always\"\
+        ;',\n  'window.RufflePlayer.config.polyfills = true;',\n  ruffleSource,\n\
+        \  'const r = window.RufflePlayer && typeof window.RufflePlayer.newest ===\
+        \ \"function\" ? window.RufflePlayer.newest() : null;',\n  'if (!r) throw\
+        \ new Error(\"Ruffle newest() unavailable\");',\n  'if (typeof r.pluginPolyfill\
+        \ === \"function\") r.pluginPolyfill();',\n  'if (typeof r.polyfill === \"\
+        function\") r.polyfill();',\n  bridgeSource,\n  'console.log(\"[Gunny ARM64]\
+        \ Ruffle + host bridge ready\");',\n  '} catch (error) {',\n  'console.error(\"\
+        [Gunny ARM64] bootstrap failed:\", error);',\n  '}',\n  '})();'\n].join('\\\
+        \\n');\n\nwebFrame.executeJavaScript(code, false).catch((error) => {\n  console.error('[Gunny\
+        \ ARM64] bootstrap failed:', error);\n});\n\ntry {\n  require(originalPreload);\n\
+        \  console.log('[Gunny ARM64] original Gunny preload loaded');\n} catch (error)\
+        \ {\n  console.error('[Gunny ARM64] original Gunny preload failed:', error);\n\
+        }\nEOF\n\nnode --check \"$RES/preload-ruffle.js\""
+    - name: Rename Electron
+      shell: bash
+      run: "set -euo pipefail\nAPP=\"build/Gunny PC ARM64.app\"\nBIN=\"$APP/Contents/MacOS\"\
+        \n\nmv \"$BIN/Electron\" \"$BIN/Gunny PC\"\nchmod +x \"$BIN/Gunny PC\"\n\n\
+        /usr/libexec/PlistBuddy \\\n  -c \"Set :CFBundleExecutable Gunny PC\" \\\n\
+        \  \"$APP/Contents/Info.plist\" \\\n  2>/dev/null || true"
+    - name: Verify ARM64 package
+      shell: bash
+      run: "set -euo pipefail\n\nAPP=\"build/Gunny PC ARM64.app\"\nBIN=\"$APP/Contents/MacOS/Gunny\
+        \ PC\"\nRES=\"$APP/Contents/Resources\"\n\nfile \"$BIN\"\nlipo -info \"$BIN\"\
+        \n\nfile \"$BIN\" | grep -q \"arm64\"\n\ntest -f \"$RES/ruffle/ruffle.js\"\
+        \ntest -f \"$RES/gunny-host.js\"\nnode --check \"$RES/gunny-host.js\"\n\n\
+        test -f \"$RES/preload-ruffle.js\"\nnode --check \"$RES/preload-ruffle.js\"\
+        \n\nrm -rf build/final-source\nasar extract \"$RES/app.asar\" build/final-source\n\
+        \nFINAL_MAIN=\"$(find build/final-source -type f -name \"main.js\" -print\
+        \ | head -n 1)\"\nnode --check \"$FINAL_MAIN\"\n\necho \"=== preload reference\
+        \ ===\"\ngrep -n \"preload-ruffle.js\" \"$FINAL_MAIN\" || true\n\necho \"\
+        === PPAPI references ===\"\ngrep -RniE \\\n  \"ppapi-flash-path|ppapi-flash-version\"\
+        \ \\\n  build/final-source \\\n  2>/dev/null \\\n  | head -100 || true"
+    - name: Sign and package
+      shell: bash
+      run: "set -euo pipefail\n\nAPP=\"build/Gunny PC ARM64.app\"\n\nxattr -cr \"\
+        $APP\" 2>/dev/null || true\nrm -rf \"$APP/Contents/_CodeSignature\"\n\ncodesign\
+        \ --deep --force --verbose --sign - \"$APP\"\ncodesign --verify --deep --strict\
+        \ --verbose=2 \"$APP\"\n\nmkdir -p release\n\nditto \\\n  -c \\\n  -k \\\n\
+        \  --sequesterRsrc \\\n  --keepParent \\\n  \"$APP\" \\\n  release/Gunny-PC-ARM64-Ruffle-HostBridge.zip\n\
+        \nls -lh release/Gunny-PC-ARM64-Ruffle-HostBridge.zip"
+    - name: Upload ARM64 build
+      uses: actions/upload-artifact@v4
+      with:
+        name: Gunny-PC-ARM64-Ruffle-HostBridge
+        path: release/Gunny-PC-ARM64-Ruffle-HostBridge.zip
+        if-no-files-found: error
+        retention-days: 14
