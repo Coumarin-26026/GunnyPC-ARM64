@@ -1,0 +1,257 @@
+name: Extract Gunny Resource Callback Contract
+'on':
+  workflow_dispatch:
+    inputs:
+      loading_swf_url:
+        description: Direct URL to Loading.swf
+        required: false
+        default: https://res737.gn.zing.vn/flash/Loading.swf
+permissions:
+  contents: read
+jobs:
+  extract-callback-contract:
+    name: Extract LoadResourceManager callback contract
+    runs-on: macos-14
+    env:
+      LOADING_SWF_URL: ${{ inputs.loading_swf_url }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Install Java and FFDec
+      shell: bash
+      run: "set -euo pipefail\n\nbrew install --quiet openjdk@21 || true\n\nJAVA_HOME=\"\
+        $(\n  /usr/libexec/java_home -v 21 2>/dev/null || true\n)\"\n\nif [ -z \"\
+        $JAVA_HOME\" ]; then\n  echo \"ERROR: Java 21 not found.\"\n  exit 1\nfi\n\
+        \necho \"JAVA_HOME=$JAVA_HOME\" >> \"$GITHUB_ENV\"\nexport JAVA_HOME\n\n\"\
+        $JAVA_HOME/bin/java\" -version\n\nVERSION=\"26.2.1\"\nURL=\"https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version${VERSION}/ffdec_${VERSION}.zip\"\
+        \n\nmkdir -p tools\n\ncurl \\\n  --fail \\\n  --location \\\n  --retry 10\
+        \ \\\n  --retry-delay 3 \\\n  --connect-timeout 30 \\\n  --max-time 600 \\\
+        \n  -A \"Mozilla/5.0\" \\\n  \"$URL\" \\\n  -o tools/ffdec.zip\n\nmkdir -p\
+        \ tools/ffdec\n\nunzip \\\n  -q \\\n  -o \\\n  tools/ffdec.zip \\\n  -d tools/ffdec\n\
+        \nFFDEC_JAR=\"$(\n  find tools/ffdec \\\n    -type f \\\n    -name \"ffdec.jar\"\
+        \ \\\n    -print \\\n    | head -n 1\n)\"\n\nif [ -z \"$FFDEC_JAR\" ]; then\n\
+        \  echo \"ERROR: ffdec.jar not found.\"\n  exit 1\nfi\n\nprintf '%s\\n' \"\
+        $FFDEC_JAR\" > tools/ffdec-jar.txt"
+    - name: Prepare Loading.swf
+      shell: bash
+      run: "set -euo pipefail\n\nrm -rf analysis\n\nmkdir -p \\\n  analysis/input\
+        \ \\\n  analysis/export \\\n  analysis/reports \\\n  analysis/as3 \\\n  analysis/package\n\
+        \nSOURCE=\"\"\n\nfor CANDIDATE in \\\n  \"$GITHUB_WORKSPACE/Loading.swf\"\
+        \ \\\n  \"$GITHUB_WORKSPACE/assets/Loading.swf\"\ndo\n  if [ -f \"$CANDIDATE\"\
+        \ ]; then\n    SOURCE=\"$CANDIDATE\"\n    break\n  fi\ndone\n\nif [ -z \"\
+        $SOURCE\" ] && [ -n \"${LOADING_SWF_URL:-}\" ]; then\n  echo \"Downloading\
+        \ Loading.swf:\"\n  echo \"$LOADING_SWF_URL\"\n\n  curl \\\n    --fail \\\n\
+        \    --location \\\n    --retry 8 \\\n    --retry-delay 3 \\\n    --connect-timeout\
+        \ 30 \\\n    --max-time 900 \\\n    -A \"Mozilla/5.0\" \\\n    \"$LOADING_SWF_URL\"\
+        \ \\\n    -o analysis/input/Loading.swf\nfi\n\nif [ -n \"$SOURCE\" ]; then\n\
+        \  cp \\\n    \"$SOURCE\" \\\n    analysis/input/Loading.swf\nfi\n\nif [ !\
+        \ -f analysis/input/Loading.swf ]; then\n  echo \"ERROR: Loading.swf not found.\"\
+        \n  exit 1\nfi\n\nHEADER=\"$(\n  xxd \\\n    -l 3 \\\n    -p \\\n    analysis/input/Loading.swf\n\
+        )\"\n\ncase \"$HEADER\" in\n  465753|435753|5a5753)\n    echo \"SWF header\
+        \ OK: $HEADER\"\n    ;;\n  *)\n    echo \"ERROR: Invalid SWF header: $HEADER\"\
+        \n    exit 1\n    ;;\nesac\n\nfile analysis/input/Loading.swf\nls -lh analysis/input/Loading.swf"
+    - name: Decompile Loading.swf
+      shell: bash
+      run: "set -euo pipefail\n\nFFDEC_JAR=\"$(cat tools/ffdec-jar.txt)\"\n\njava\
+        \ \\\n  -jar \\\n  \"$FFDEC_JAR\" \\\n  -export \\\n  script \\\n  analysis/export\
+        \ \\\n  analysis/input/Loading.swf\n\nfind \\\n  analysis/export \\\n  -type\
+        \ f \\\n  -print \\\n  | sort \\\n  > analysis/reports/exported-files.txt\n\
+        \necho \"Exported files:\"\nhead -5000 \\\n  analysis/reports/exported-files.txt"
+    - name: Find LoadResourceManager methods
+      shell: bash
+      run: "set -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ re\n\nroot = Path(\"analysis/export\")\n\nterms = [\n    \"__checkComplete\"\
+        ,\n    \"__deleteComplete\",\n    \"__flashGotoAndPlay\",\n    \"checkComplete\"\
+        ,\n    \"deleteComplete\",\n    \"flashGotoAndPlay\",\n    \"LoadInterfaceEvent\"\
+        ,\n    \"paras\",\n    \"checkResource\",\n    \"deleteResource\",\n]\n\n\
+        matches = []\n\nfor path in sorted(root.rglob(\"*\")):\n    if not path.is_file():\n\
+        \        continue\n\n    try:\n        lines = path.read_text(\n         \
+        \   encoding=\"utf-8\",\n            errors=\"ignore\"\n        ).splitlines()\n\
+        \    except Exception:\n        continue\n\n    for number, line in enumerate(lines,\
+        \ 1):\n        if any(\n            term.lower() in line.lower()\n       \
+        \     for term in terms\n        ):\n            matches.append(\n       \
+        \         (\n                    str(path),\n                    number,\n\
+        \                    line.strip()\n                )\n            )\n\nout\
+        \ = Path(\n    \"analysis/reports/load-resource-methods.txt\"\n)\n\nwith out.open(\n\
+        \    \"w\",\n    encoding=\"utf-8\"\n) as handle:\n    for file, line_no,\
+        \ text in matches:\n        handle.write(\n            f\"{file}:{line_no}:{text}\\\
+        n\"\n        )\n\nprint(\n    f\"Found {len(matches)} relevant lines.\"\n\
+        )\nPY\n\ncat \\\n  analysis/reports/load-resource-methods.txt \\\n  | head\
+        \ -20000 \\\n  || true"
+    - name: Extract full method contexts
+      shell: bash
+      run: "set -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\n\nroot\
+        \ = Path(\"analysis/export\")\n\nneedles = [\n    \"__checkComplete\",\n \
+        \   \"__deleteComplete\",\n    \"__flashGotoAndPlay\",\n    \"checkComplete\"\
+        ,\n    \"deleteComplete\",\n    \"flashGotoAndPlay\",\n]\n\nout = Path(\n\
+        \    \"analysis/reports/load-resource-context.txt\"\n)\n\nwritten = set()\n\
+        \nwith out.open(\n    \"w\",\n    encoding=\"utf-8\"\n) as handle:\n\n   \
+        \ for path in sorted(root.rglob(\"*\")):\n        if not path.is_file():\n\
+        \            continue\n\n        try:\n            lines = path.read_text(\n\
+        \                encoding=\"utf-8\",\n                errors=\"ignore\"\n\
+        \            ).splitlines()\n        except Exception:\n            continue\n\
+        \n        for index, line in enumerate(lines):\n\n            if not any(\n\
+        \                needle.lower() in line.lower()\n                for needle\
+        \ in needles\n            ):\n                continue\n\n            key\
+        \ = (\n                str(path),\n                index\n            )\n\n\
+        \            if key in written:\n                continue\n\n            written.add(key)\n\
+        \n            start = max(\n                0,\n                index - 35\n\
+        \            )\n\n            end = min(\n                len(lines),\n  \
+        \              index + 80\n            )\n\n            handle.write(\n  \
+        \              \"\\n\"\n                + \"=\" * 100\n                + \"\
+        \\n\"\n            )\n\n            handle.write(\n                f\"{path}:{index\
+        \ + 1}\\n\"\n            )\n\n            handle.write(\n                \"\
+        =\" * 100\n                + \"\\n\"\n            )\n\n            for number\
+        \ in range(\n                start,\n                end\n            ):\n\
+        \                handle.write(\n                    f\"{number + 1:6}: \"\n\
+        \                    f\"{lines[number]}\\n\"\n                )\n\n      \
+        \      handle.write(\"\\n\")\n\nprint(\n    \"Contexts extracted:\",\n   \
+        \ len(written)\n)\nPY\n\ncat \\\n  analysis/reports/load-resource-context.txt\
+        \ \\\n  | head -30000 \\\n  || true"
+    - name: Analyze LoadInterfaceEvent.paras
+      shell: bash
+      run: "set -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ re\nimport json\n\nroot = Path(\"analysis/export\")\n\nresults = []\n\n\
+        patterns = [\n    r\"\\bLoadInterfaceEvent\\b\",\n    r\"\\.paras\\b\",\n\
+        \    r\"\\bparas\\s*=\",\n    r\"\\bparas\\s*:\",\n    r\"getParas\",\n  \
+        \  r\"setParas\",\n]\n\nfor path in sorted(root.rglob(\"*\")):\n    if not\
+        \ path.is_file():\n        continue\n\n    try:\n        lines = path.read_text(\n\
+        \            encoding=\"utf-8\",\n            errors=\"ignore\"\n        ).splitlines()\n\
+        \    except Exception:\n        continue\n\n    for index, line in enumerate(lines):\n\
+        \n        if not any(\n            re.search(\n                pattern,\n\
+        \                line,\n                re.I\n            )\n            for\
+        \ pattern in patterns\n        ):\n            continue\n\n        start =\
+        \ max(\n            0,\n            index - 12\n        )\n\n        end =\
+        \ min(\n            len(lines),\n            index + 30\n        )\n\n   \
+        \     results.append(\n            {\n                \"file\": str(path),\n\
+        \                \"line\": index + 1,\n                \"text\": line.strip(),\n\
+        \                \"context\": lines[start:end],\n            }\n        )\n\
+        \nPath(\n    \"analysis/reports/load-interface-event-paras.json\"\n).write_text(\n\
+        \    json.dumps(\n        results,\n        indent=2,\n        ensure_ascii=False\n\
+        \    ),\n    encoding=\"utf-8\"\n)\n\nwith open(\n    \"analysis/reports/load-interface-event-paras.txt\"\
+        ,\n    \"w\",\n    encoding=\"utf-8\"\n) as handle:\n    for item in results:\n\
+        \        handle.write(\n            f\"===== {item['file']}:{item['line']}\
+        \ =====\\n\"\n        )\n        for offset, line in enumerate(\n        \
+        \    item[\"context\"],\n            start=max(1, item[\"line\"] - 12)\n \
+        \       ):\n            handle.write(\n                f\"{offset:6}: {line}\\\
+        n\"\n            )\n        handle.write(\"\\n\")\n\nprint(\n    f\"paras\
+        \ contexts: {len(results)}\"\n)\nPY\n\ncat \\\n  analysis/reports/load-interface-event-paras.txt\
+        \ \\\n  | head -30000 \\\n  || true"
+    - name: Trace event dispatch and listeners
+      shell: bash
+      run: "set -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ re\n\nroot = Path(\"analysis/export\")\n\npatterns = [\n    r\"\\.dispatchEvent\\\
+        s*\\(\",\n    r\"\\.addEventListener\\s*\\(\",\n    r\"new\\s+LoadInterfaceEvent\"\
+        ,\n    r\"LoadInterfaceEvent\\s*\\(\",\n    r\"\\.type\\s*=\\s*['\\\"](?:checkComplete|deleteComplete|flashGotoAndPlay)\"\
+        ,\n]\n\nhits = []\n\nfor path in sorted(root.rglob(\"*\")):\n    if not path.is_file():\n\
+        \        continue\n\n    try:\n        lines = path.read_text(\n         \
+        \   encoding=\"utf-8\",\n            errors=\"ignore\"\n        ).splitlines()\n\
+        \    except Exception:\n        continue\n\n    for index, line in enumerate(lines):\n\
+        \        if any(\n            re.search(\n                pattern,\n     \
+        \           line,\n                re.I\n            )\n            for pattern\
+        \ in patterns\n        ):\n            start = max(0, index - 10)\n      \
+        \      end = min(len(lines), index + 25)\n\n            hits.append(\n   \
+        \             (\n                    str(path),\n                    index\
+        \ + 1,\n                    lines[start:end]\n                )\n        \
+        \    )\n\nwith open(\n    \"analysis/reports/event-dispatch-map.txt\",\n \
+        \   \"w\",\n    encoding=\"utf-8\"\n) as handle:\n    for path, line, context\
+        \ in hits:\n        handle.write(\n            \"\\n\" + \"=\" * 100 + \"\\\
+        n\"\n        )\n        handle.write(\n            f\"{path}:{line}\\n\"\n\
+        \        )\n        handle.write(\n            \"=\" * 100 + \"\\n\"\n   \
+        \     )\n        for number, text in enumerate(\n            context,\n  \
+        \          start=max(1, line - 10)\n        ):\n            handle.write(\n\
+        \                f\"{number:6}: {text}\\n\"\n            )\n\nprint(\n   \
+        \ f\"Event dispatch contexts: {len(hits)}\"\n)\nPY\n\ncat \\\n  analysis/reports/event-dispatch-map.txt\
+        \ \\\n  | head -30000 \\\n  || true"
+    - name: Trace ExternalInterface callbacks
+      shell: bash
+      run: "set -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ re\n\nroot = Path(\"analysis/export\")\n\npatterns = [\n    r\"ExternalInterface\\\
+        s*\\.\\s*addCallback\",\n    r\"ExternalInterface\\s*\\.\\s*call\",\n    r\"\
+        fscommand\\s*\\(\",\n    r\"setFlashLoadExternal\",\n    r\"setFlashLoadWeb\"\
+        ,\n]\n\nout = Path(\n    \"analysis/reports/externalinterface-context.txt\"\
+        \n)\n\nwith out.open(\n    \"w\",\n    encoding=\"utf-8\"\n) as handle:\n\n\
+        \    for path in sorted(root.rglob(\"*\")):\n        if not path.is_file():\n\
+        \            continue\n\n        try:\n            lines = path.read_text(\n\
+        \                encoding=\"utf-8\",\n                errors=\"ignore\"\n\
+        \            ).splitlines()\n        except Exception:\n            continue\n\
+        \n        for index, line in enumerate(lines):\n\n            if not any(\n\
+        \                re.search(\n                    pattern,\n              \
+        \      line,\n                    re.I\n                )\n              \
+        \  for pattern in patterns\n            ):\n                continue\n\n \
+        \           start = max(0, index - 20)\n            end = min(len(lines),\
+        \ index + 45)\n\n            handle.write(\n                \"\\n\"\n    \
+        \            + \"=\" * 100\n                + \"\\n\"\n                + f\"\
+        {path}:{index + 1}\\n\"\n                + \"=\" * 100\n                +\
+        \ \"\\n\"\n            )\n\n            for number in range(\n           \
+        \     start,\n                end\n            ):\n                handle.write(\n\
+        \                    f\"{number + 1:6}: {lines[number]}\\n\"\n           \
+        \     )\n\nprint(\n    \"ExternalInterface context extracted.\"\n)\nPY\n\n\
+        cat \\\n  analysis/reports/externalinterface-context.txt \\\n  | head -30000\
+        \ \\\n  || true"
+    - name: Build callback contract
+      shell: bash
+      run: "set -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ re\nimport json\n\nroot = Path(\"analysis/export\")\n\nmethods = [\n   \
+        \ \"__checkComplete\",\n    \"__deleteComplete\",\n    \"__flashGotoAndPlay\"\
+        ,\n    \"checkComplete\",\n    \"deleteComplete\",\n    \"flashGotoAndPlay\"\
+        ,\n]\n\ncontract = {\n    \"callbacks\": {},\n    \"events\": {},\n}\n\ndef\
+        \ extract_method(text, name):\n    pattern = re.compile(\n        rf\"\\b(?:public\\\
+        s+|private\\s+|protected\\s+|internal\\s+|override\\s+|static\\s+)*function\\\
+        s+{re.escape(name)}\\s*\\(\",\n        re.I\n    )\n\n    match = pattern.search(text)\n\
+        \n    if not match:\n        return None\n\n    start = match.start()\n\n\
+        \    brace = text.find(\n        \"{\",\n        match.end()\n    )\n\n  \
+        \  if brace < 0:\n        return None\n\n    depth = 0\n    quote = None\n\
+        \    escape = False\n\n    for index in range(\n        brace,\n        len(text)\n\
+        \    ):\n        char = text[index]\n\n        if quote:\n            if escape:\n\
+        \                escape = False\n            elif char == \"\\\\\":\n    \
+        \            escape = True\n            elif char == quote:\n            \
+        \    quote = None\n            continue\n\n        if char in (\"'\", '\"\
+        '):\n            quote = char\n            continue\n\n        if char ==\
+        \ \"{\":\n            depth += 1\n        elif char == \"}\":\n          \
+        \  depth -= 1\n\n            if depth == 0:\n                return text[start:index\
+        \ + 1]\n\n    return None\n\nfor path in sorted(root.rglob(\"*\")):\n    if\
+        \ not path.is_file():\n        continue\n\n    try:\n        text = path.read_text(\n\
+        \            encoding=\"utf-8\",\n            errors=\"ignore\"\n        )\n\
+        \    except Exception:\n        continue\n\n    for method in methods:\n \
+        \       body = extract_method(\n            text,\n            method\n  \
+        \      )\n\n        if body:\n            contract.setdefault(\n         \
+        \       \"callbacks\",\n                {}\n            ).setdefault(\n  \
+        \              method,\n                []\n            ).append(\n      \
+        \          {\n                    \"file\": str(path),\n                 \
+        \   \"source\": body,\n                }\n            )\n\n    for event_name\
+        \ in methods:\n        for match in re.finditer(\n            rf\"['\\\"]{re.escape(event_name)}['\\\
+        \"]\",\n            text,\n            flags=re.I\n        ):\n          \
+        \  contract.setdefault(\n                \"events\",\n                {}\n\
+        \            ).setdefault(\n                event_name,\n                []\n\
+        \            ).append(\n                {\n                    \"file\": str(path),\n\
+        \                    \"offset\": match.start()\n                }\n      \
+        \      )\n\nPath(\n    \"analysis/reports/callback-contract.json\"\n).write_text(\n\
+        \    json.dumps(\n        contract,\n        indent=2,\n        ensure_ascii=False\n\
+        \    ),\n    encoding=\"utf-8\"\n)\nPY\n\npython3 -m json.tool \\\n  analysis/reports/callback-contract.json\
+        \ \\\n  | head -30000"
+    - name: Build final bridge specification
+      shell: bash
+      run: "set -euo pipefail\n\n{\n  echo \"# Gunny Resource Callback Contract\"\n\
+        \  echo\n  echo \"Generated: $(date -u)\"\n  echo\n  echo \"## LoadResourceManager\
+        \ methods\"\n  cat analysis/reports/load-resource-methods.txt || true\n  echo\n\
+        \  echo \"## Full callback contexts\"\n  cat analysis/reports/load-resource-context.txt\
+        \ || true\n  echo\n  echo \"## LoadInterfaceEvent.paras\"\n  cat analysis/reports/load-interface-event-paras.txt\
+        \ || true\n  echo\n  echo \"## Event dispatch/listeners\"\n  cat analysis/reports/event-dispatch-map.txt\
+        \ || true\n  echo\n  echo \"## ExternalInterface\"\n  cat analysis/reports/externalinterface-context.txt\
+        \ || true\n  echo\n  echo \"## Callback contract JSON\"\n  cat analysis/reports/callback-contract.json\
+        \ || true\n} > analysis/reports/GUNNY-RESOURCE-CALLBACK-CONTRACT.md\n\ncat\
+        \ \\\n  analysis/reports/GUNNY-RESOURCE-CALLBACK-CONTRACT.md \\\n  | head\
+        \ -40000"
+    - name: Package analysis
+      shell: bash
+      run: "set -euo pipefail\n\ncp -R \\\n  analysis/reports \\\n  analysis/package/reports\n\
+        \n(\n  cd analysis/package\n  zip \\\n    -qr \\\n    ../../gunny-resource-callback-contract.zip\
+        \ \\\n    .\n)\n\nls -lh \\\n  gunny-resource-callback-contract.zip"
+    - name: Upload analysis
+      uses: actions/upload-artifact@v4
+      with:
+        name: Gunny-Resource-Callback-Contract
+        path: gunny-resource-callback-contract.zip
+        if-no-files-found: error
+        retention-days: 14
