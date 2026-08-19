@@ -1,0 +1,155 @@
+name: Extract Gunny Flash Host Bridge
+'on':
+  workflow_dispatch:
+    inputs:
+      loading_swf_url:
+        description: Direct URL to Loading.swf
+        required: false
+        default: https://res737.gn.zing.vn/flash/Loading.swf
+permissions:
+  contents: read
+jobs:
+  extract-host-bridge:
+    name: Extract fscommand and ExternalInterface
+    runs-on: macos-14
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Install Java and FFDec
+      shell: bash
+      run: "\nset -euo pipefail\n\nbrew install --quiet openjdk@21 || true\n\nJAVA_HOME=\"\
+        $(\n  /usr/libexec/java_home -v 21 2>/dev/null || true\n)\"\n\nif [ -z \"\
+        $JAVA_HOME\" ]; then\n  echo \"ERROR: Java 21 not found.\"\n  exit 1\nfi\n\
+        \necho \"JAVA_HOME=$JAVA_HOME\" >> \"$GITHUB_ENV\"\nexport JAVA_HOME\n\n\"\
+        $JAVA_HOME/bin/java\" -version\n\nVERSION=\"26.2.1\"\nURL=\"https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version${VERSION}/ffdec_${VERSION}.zip\"\
+        \n\nmkdir -p tools\ncurl --fail --location --retry 10 --retry-delay 3 \\\n\
+        \  --connect-timeout 30 --max-time 600 \\\n  -A \"Mozilla/5.0\" \"$URL\" -o\
+        \ tools/ffdec.zip\n\nmkdir -p tools/ffdec\nunzip -q -o tools/ffdec.zip -d\
+        \ tools/ffdec\n\nFFDEC_JAR=\"$(\n  find tools/ffdec -type f -name \"ffdec.jar\"\
+        \ -print | head -n 1\n)\"\n\nif [ -z \"$FFDEC_JAR\" ]; then\n  echo \"ERROR:\
+        \ ffdec.jar not found.\"\n  exit 1\nfi\n\nprintf '%s\\n' \"$FFDEC_JAR\" >\
+        \ tools/ffdec-jar.txt\n"
+    - name: Prepare Loading.swf
+      shell: bash
+      run: "\nset -euo pipefail\n\nrm -rf analysis\nmkdir -p analysis/input analysis/export\
+        \ analysis/reports analysis/package\n\nSOURCE=\"\"\n\n# Repository copy, if\
+        \ present.\nfor CANDIDATE in \\\n  \"$GITHUB_WORKSPACE/Loading.swf\" \\\n\
+        \  \"$GITHUB_WORKSPACE/assets/Loading.swf\"\ndo\n  if [ -f \"$CANDIDATE\"\
+        \ ]; then\n    SOURCE=\"$CANDIDATE\"\n    break\n  fi\ndone\n\n# Otherwise\
+        \ download the SWF directly.\nif [ -z \"$SOURCE\" ] && [ -n \"${LOADING_SWF_URL:-}\"\
+        \ ]; then\n  echo \"Downloading Loading.swf:\"\n  echo \"$LOADING_SWF_URL\"\
+        \n\n  curl \\\n    --fail \\\n    --location \\\n    --retry 8 \\\n    --retry-delay\
+        \ 3 \\\n    --connect-timeout 30 \\\n    --max-time 900 \\\n    -A \"Mozilla/5.0\"\
+        \ \\\n    \"$LOADING_SWF_URL\" \\\n    -o analysis/input/Loading.swf\nfi\n\
+        \n# Copy a repository file into the same analysis path.\nif [ -n \"$SOURCE\"\
+        \ ]; then\n  cp \\\n    \"$SOURCE\" \\\n    analysis/input/Loading.swf\nfi\n\
+        \nif [ ! -f analysis/input/Loading.swf ]; then\n  echo\n  echo \"ERROR: Loading.swf\
+        \ could not be obtained.\"\n  echo\n  echo \"Use either:\"\n  echo \"  1.\
+        \ Commit Loading.swf into the repository, or\"\n  echo \"  2. Set loading_swf_url\
+        \ when running the workflow.\"\n  exit 1\nfi\n\nHEADER=\"$(\n  xxd \\\n  \
+        \  -l 3 \\\n    -p \\\n    analysis/input/Loading.swf\n)\"\n\ncase \"$HEADER\"\
+        \ in\n  465753)\n    echo \"SWF header OK: FWS\"\n    ;;\n  435753)\n    echo\
+        \ \"SWF header OK: CWS\"\n    ;;\n  5a5753)\n    echo \"SWF header OK: ZWS\"\
+        \n    ;;\n  *)\n    echo \"ERROR: Invalid SWF header: $HEADER\"\n    echo\n\
+        \    echo \"First bytes:\"\n    xxd \\\n      -l 32 \\\n      analysis/input/Loading.swf\n\
+        \    exit 1\n    ;;\nesac\n\necho\necho \"File:\"\nfile analysis/input/Loading.swf\n\
+        \necho\necho \"Size:\"\nls -lh analysis/input/Loading.swf\n\necho\necho \"\
+        SHA256:\"\nshasum -a 256 analysis/input/Loading.swf\n"
+      env:
+        LOADING_SWF_URL: ${{ inputs.loading_swf_url }}
+    - name: Decompile Loading.swf
+      shell: bash
+      run: "\nset -euo pipefail\n\nFFDEC_JAR=\"$(cat tools/ffdec-jar.txt)\"\n\njava\
+        \ \\\n  -jar \"$FFDEC_JAR\" \\\n  -export script \\\n  analysis/export \\\n\
+        \  analysis/input/Loading.swf\n\nfind analysis/export \\\n  -type f \\\n \
+        \ -print \\\n  | sort \\\n  > analysis/reports/exported-files.txt\n\nhead\
+        \ -3000 analysis/reports/exported-files.txt\n"
+    - name: Extract bridge calls and arguments
+      shell: bash
+      run: "\nset -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\nimport\
+        \ json\nimport re\n\nroot = Path(\"analysis/export\")\n\nresults = []\n\n\
+        for path in sorted(root.rglob(\"*\")):\n    if not path.is_file():\n     \
+        \   continue\n\n    try:\n        text = path.read_text(encoding=\"utf-8\"\
+        , errors=\"ignore\")\n    except Exception:\n        continue\n\n    for line_no,\
+        \ line in enumerate(text.splitlines(), 1):\n        stripped = line.strip()\n\
+        \n        checks = [\n            (\"fscommand\", r\"\\bfscommand\\s*\\(\"\
+        ),\n            (\"ExternalInterface.call\", r\"\\bExternalInterface\\s*\\\
+        .\\s*call\\s*\\(\"),\n            (\"ExternalInterface.addCallback\", r\"\\\
+        bExternalInterface\\s*\\.\\s*addCallback\\s*\\(\"),\n            (\"ExternalInterface.available\"\
+        , r\"\\bExternalInterface\\s*\\.\\s*available\\b\"),\n        ]\n\n      \
+        \  for kind, pattern in checks:\n            if re.search(pattern, line, re.I):\n\
+        \                result = {\n                    \"kind\": kind,\n       \
+        \             \"file\": str(path),\n                    \"line\": line_no,\n\
+        \                    \"text\": stripped,\n                }\n\n          \
+        \      if kind == \"fscommand\":\n                    m = re.search(\n   \
+        \                     r'\\bfscommand\\s*\\(\\s*[\"\\']([^\"\\']+)[\"\\'](?:\\\
+        s*,\\s*[\"\\']([^\"\\']*)[\"\\'])?',\n                        line,\n    \
+        \                    re.I\n                    )\n                    if m:\n\
+        \                        result[\"arguments\"] = [\n                     \
+        \       m.group(1),\n                            m.group(2) or \"\"\n    \
+        \                    ]\n\n                elif kind == \"ExternalInterface.call\"\
+        :\n                    m = re.search(\n                        r'\\bExternalInterface\\\
+        s*\\.\\s*call\\s*\\(\\s*[\"\\']([^\"\\']+)[\"\\']',\n                    \
+        \    line,\n                        re.I\n                    )\n        \
+        \            if m:\n                        result[\"method\"] = m.group(1)\n\
+        \n                elif kind == \"ExternalInterface.addCallback\":\n      \
+        \              m = re.search(\n                        r'\\bExternalInterface\\\
+        s*\\.\\s*addCallback\\s*\\(\\s*[\"\\']([^\"\\']+)[\"\\']',\n             \
+        \           line,\n                        re.I\n                    )\n \
+        \                   if m:\n                        result[\"callback\"] =\
+        \ m.group(1)\n\n                results.append(result)\n                break\n\
+        \nPath(\"analysis/reports/bridge-calls.json\").write_text(\n    json.dumps(results,\
+        \ indent=2, ensure_ascii=False),\n    encoding=\"utf-8\"\n)\n\nwith open(\"\
+        analysis/reports/bridge-calls.txt\", \"w\", encoding=\"utf-8\") as out:\n\
+        \    for item in results:\n        out.write(\n            f\"[{item['kind']}]\
+        \ {item['file']}:{item['line']}\\n\"\n        )\n        out.write(\n    \
+        \        json.dumps(item, ensure_ascii=False) + \"\\n\\n\"\n        )\n\n\
+        print(f\"Found {len(results)} bridge call locations.\")\nPY\n\ncat analysis/reports/bridge-calls.txt\
+        \ | head -10000 || true\n"
+    - name: Extract target Gunny host methods
+      shell: bash
+      run: "\nset -euo pipefail\n\ngrep -RniE \\\n  \"checkResource|checkComplete|deleteResource|deleteComplete|setVersion|setSound|setDailyTask|setDailyActivity|setFatigue|SetIsDesktop|landersAward|flashGotoAndPlay|setFlashLoadExternal|setFlashLoadWeb|setFlashFocus|__onLoadGameComplete|__onLunchGame\"\
+        \ \\\n  analysis/export \\\n  2>/dev/null \\\n  | head -20000 \\\n  > analysis/reports/target-methods.txt\
+        \ \\\n  || true\n\ncat analysis/reports/target-methods.txt\n"
+    - name: Extract resource bridge context
+      shell: bash
+      run: "\nset -euo pipefail\n\npython3 <<'PY'\nfrom pathlib import Path\n\nroot\
+        \ = Path(\"analysis/export\")\nterms = [\n    \"checkResource\",\n    \"checkComplete\"\
+        ,\n    \"deleteResource\",\n    \"deleteComplete\",\n    \"setFlashLoadExternal\"\
+        ,\n    \"setFlashLoadWeb\",\n    \"flashGotoAndPlay\",\n    \"__onLoadGameComplete\"\
+        ,\n    \"__onLunchGame\",\n]\n\nout = Path(\"analysis/reports/resource-bridge-context.txt\"\
+        )\n\nwith out.open(\"w\", encoding=\"utf-8\") as handle:\n    count = 0\n\n\
+        \    for path in sorted(root.rglob(\"*\")):\n        if not path.is_file():\n\
+        \            continue\n\n        try:\n            lines = path.read_text(\n\
+        \                encoding=\"utf-8\",\n                errors=\"ignore\"\n\
+        \            ).splitlines()\n        except Exception:\n            continue\n\
+        \n        for index, line in enumerate(lines):\n            if any(term.lower()\
+        \ in line.lower() for term in terms):\n                start = max(0, index\
+        \ - 15)\n                end = min(len(lines), index + 26)\n\n           \
+        \     handle.write(\n                    f\"\\n===== {path}:{index + 1} =====\\\
+        n\"\n                )\n                handle.write(\n                  \
+        \  \"\\n\".join(lines[start:end])\n                )\n                handle.write(\"\
+        \\n\")\n\n                count += 1\n\nprint(f\"Context locations: {count}\"\
+        )\nPY\n\ncat analysis/reports/resource-bridge-context.txt | head -20000 ||\
+        \ true\n"
+    - name: Build gunny-host specification
+      shell: bash
+      run: "\nset -euo pipefail\n\n{\n  echo \"# Gunny Host Bridge Specification\"\
+        \n  echo\n  echo \"## Bridge calls\"\n  cat analysis/reports/bridge-calls.txt\
+        \ || true\n  echo\n  echo \"## Target host methods\"\n  cat analysis/reports/target-methods.txt\
+        \ || true\n  echo\n  echo \"## Resource bridge context\"\n  cat analysis/reports/resource-bridge-context.txt\
+        \ || true\n} > analysis/reports/GUNNY-HOST-BRIDGE-SPEC.md\n\ncat analysis/reports/GUNNY-HOST-BRIDGE-SPEC.md\
+        \ | head -25000\n"
+    - name: Package result
+      shell: bash
+      run: "\nset -euo pipefail\n\ncp -R analysis/reports analysis/package/reports\n\
+        cp -R analysis/export analysis/package/export\ncp analysis/input/Loading.swf\
+        \ analysis/package/Loading.swf\n\n(\n  cd analysis/package\n  zip -qr ../../gunny-host-bridge-analysis.zip\
+        \ .\n)\n\nls -lh gunny-host-bridge-analysis.zip\n"
+    - name: Upload analysis
+      uses: actions/upload-artifact@v4
+      with:
+        name: Gunny-Host-Bridge-Analysis
+        path: gunny-host-bridge-analysis.zip
+        if-no-files-found: error
+        retention-days: 14
