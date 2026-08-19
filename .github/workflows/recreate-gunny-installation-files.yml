@@ -1,0 +1,390 @@
+name: Recreate Gunny Installation Files
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GUNNY_URL: "https://drive.usercontent.google.com/download?id=1eSeWTP8rvlvrnMyjyNtbBYFVWl_d0xdQ&export=download&confirm=t&uuid=054c88aa-b0e6-46f4-b363-1aae1fcffb2b"
+  APP_NAME: "Gunny PC"
+
+jobs:
+  recreate-installation:
+    name: Extract and recreate complete Gunny installation tree
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install extraction tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          brew install p7zip || true
+
+          command -v 7z
+          command -v unzip
+          command -v hdiutil
+
+      - name: Prepare workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf \
+            build \
+            release
+
+          mkdir -p \
+            build/download \
+            build/extracted \
+            build/installation \
+            build/reports \
+            release
+
+      - name: Download original Gunny package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl \
+            --fail \
+            --location \
+            --retry 10 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            -A "Mozilla/5.0" \
+            "$GUNNY_URL" \
+            -o build/download/gunny_package
+
+          echo "Downloaded package:"
+          ls -lh \
+            build/download/gunny_package
+
+          echo
+          echo "File type:"
+          file \
+            build/download/gunny_package
+
+      - name: Extract package automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="build/download/gunny_package"
+          DEST="$GITHUB_WORKSPACE/build/extracted"
+
+          TYPE="$(file "$FILE")"
+
+          echo "Detected:"
+          echo "$TYPE"
+
+          case "$TYPE" in
+            *"Zip archive"*)
+              echo "Format: ZIP"
+
+              unzip \
+                -q \
+                -o \
+                "$FILE" \
+                -d "$DEST"
+              ;;
+
+            *"7-zip"*"archive"*)
+              echo "Format: 7Z"
+
+              7z \
+                x \
+                "$FILE" \
+                "-o$DEST"
+              ;;
+
+            *"gzip compressed"*)
+              echo "Format: GZIP"
+
+              tar \
+                -xzf \
+                "$FILE" \
+                -C "$DEST"
+              ;;
+
+            *"Apple Disk Image"*)
+              echo "Format: DMG"
+
+              DMG_MOUNT="/tmp/gunny-dmg"
+
+              rm -rf "$DMG_MOUNT"
+              mkdir -p "$DMG_MOUNT"
+
+              hdiutil attach \
+                "$FILE" \
+                -mountpoint "$DMG_MOUNT" \
+                -nobrowse \
+                -readonly
+
+              cp \
+                -R \
+                "$DMG_MOUNT"/. \
+                "$DEST"/
+
+              hdiutil detach \
+                "$DMG_MOUNT"
+              ;;
+
+            *)
+              echo "WARNING: Unknown archive format."
+              echo "Keeping the original file."
+
+              cp \
+                "$FILE" \
+                "$DEST/"
+              ;;
+          esac
+
+          echo
+          echo "Extraction completed."
+
+          find \
+            "$DEST" \
+            -maxdepth 10 \
+            -print \
+            | sort \
+            | head -5000
+
+      - name: Locate complete Gunny application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(
+            find build/extracted \
+              -type d \
+              -name "*.app" \
+              -print \
+              | while IFS= read -r CANDIDATE; do
+
+                  if [ \
+                    -f "$CANDIDATE/Contents/Info.plist" \
+                  ]; then
+                    echo "$CANDIDATE"
+                    break
+                  fi
+
+                done
+          )"
+
+          if [ -z "$APP" ]; then
+            echo "ERROR: No macOS .app was found."
+
+            echo
+            echo "Possible installation directories:"
+            find \
+              build/extracted \
+              -type d \
+              | head -1000
+
+            exit 1
+          fi
+
+          printf '%s\n' "$APP" \
+            > build/reports/app-path.txt
+
+          echo "Gunny application:"
+          cat \
+            build/reports/app-path.txt
+
+      - name: Recreate installation directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(cat build/reports/app-path.txt)"
+          DEST="build/installation/Gunny PC.app"
+
+          rm -rf "$DEST"
+
+          cp \
+            -R \
+            "$APP" \
+            "$DEST"
+
+          echo "Installation recreated at:"
+          echo "$DEST"
+
+          echo
+          echo "Top-level structure:"
+          find \
+            "$DEST" \
+            -maxdepth 4 \
+            -print \
+            | sort \
+            | head -3000
+
+      - name: Generate complete file manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/installation/Gunny PC.app"
+
+          {
+            echo "===== APPLICATION ====="
+            echo "$APP"
+
+            echo
+            echo "===== APP SIZE ====="
+            du -sh \
+              "$APP"
+
+            echo
+            echo "===== FILE COUNT ====="
+            find \
+              "$APP" \
+              -type f \
+              | wc -l
+
+            echo
+            echo "===== ALL FILES ====="
+            find \
+              "$APP" \
+              -type f \
+              -print \
+              | sort
+
+            echo
+            echo "===== EXECUTABLES ====="
+            find \
+              "$APP" \
+              -type f \
+              -perm -111 \
+              -print \
+              | sort
+
+            echo
+            echo "===== MACH-O ARCHITECTURES ====="
+
+            find \
+              "$APP" \
+              -type f \
+              -perm -111 \
+              -print0 |
+            while IFS= read -r -d '' FILE; do
+              echo
+              echo "--- $FILE ---"
+              file "$FILE"
+
+              if file "$FILE" | grep -q "Mach-O"; then
+                lipo \
+                  -info \
+                  "$FILE" \
+                  2>/dev/null \
+                  || true
+              fi
+            done
+
+            echo
+            echo "===== ELECTRON COMPONENTS ====="
+
+            find \
+              "$APP" \
+              \( \
+                -name "app.asar" \
+                -o \
+                -name "Electron Framework.framework" \
+                -o \
+                -name "Electron" \
+              \) \
+              -print \
+              | sort
+
+            echo
+            echo "===== FLASH COMPONENTS ====="
+
+            find \
+              "$APP" \
+              \( \
+                -iname "*PepperFlash*" \
+                -o \
+                -iname "*FlashPlayer*" \
+                -o \
+                -iname "*.swf" \
+              \) \
+              -print \
+              | sort
+
+          } > \
+            build/reports/installation-manifest.txt
+
+          cat \
+            build/reports/installation-manifest.txt
+
+      - name: Extract app.asar copy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/installation/Gunny PC.app"
+          ASAR="$APP/Contents/Resources/app.asar"
+
+          if [ -f "$ASAR" ]; then
+            cp \
+              "$ASAR" \
+              build/installation/Gunny-app.asar
+
+            echo "app.asar copied:"
+            ls -lh \
+              build/installation/Gunny-app.asar
+          else
+            echo "WARNING: app.asar was not found."
+          fi
+
+      - name: Create installation archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="build/installation/Gunny PC.app"
+
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            "$APP" \
+            release/Gunny-PC-original-installation.zip
+
+          cp \
+            build/reports/installation-manifest.txt \
+            release/installation-manifest.txt
+
+          cp \
+            build/reports/app-path.txt \
+            release/app-path.txt
+
+          ls -lh \
+            release/*
+
+      - name: Upload complete installation
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-PC-Complete-Installation
+          path: |
+            release/Gunny-PC-original-installation.zip
+            release/installation-manifest.txt
+            release/app-path.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload extracted directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gunny-PC-Extracted-Files
+          path: |
+            build/installation/
+          if-no-files-found: error
+          retention-days: 14
